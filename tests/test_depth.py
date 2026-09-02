@@ -38,6 +38,13 @@ def test_floor_count_and_ladder():
     assert d.ladder("Case A", 3) == [(0.28, 2), (0.32, 1), (0.42, 36)]
 
 
+def test_bulk_floor_skips_thin_bottom():
+    d = _idx()
+    # total 7419 -> thr = max(20, 74) = 74; перший рівень >= 74 це $0.44 (2287)
+    assert d.bulk_floor("Case A") == 0.44
+    assert d.bulk_floor("Nope") is None
+
+
 @pytest.mark.parametrize("raw,expected", [
     ("AWP | Asiimov (Field-Tested) 55", ("AWP | Asiimov (Field-Tested)", 55.0, 1)),
     ("Sealed Dead Hand Terminal 0.44 x200", ("Sealed Dead Hand Terminal", 0.44, 200)),

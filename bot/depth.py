@@ -113,6 +113,19 @@ class DepthIndex:
         lad = self._ladders.get(name)
         return min(lad) if lad else None
 
+    def bulk_floor(self, name: str):
+        """Найдешевша ціна з реальним обсягом — перший «товстий» рівень.
+
+        Відсікає поодинокі свіжі/зовнішні лоти на дні (1-30 шт), які на сайті
+        ще не видно. Поріг — 1% усіх лотів або 20, що більше.
+        """
+        lad = self._ladders.get(name)
+        if not lad:
+            return None
+        thr = max(20, sum(lad.values()) // 100)
+        fat = [p for p, q in lad.items() if q >= thr]
+        return min(fat) if fat else min(lad)
+
     def count(self, name: str):
         lad = self._ladders.get(name)
         return sum(lad.values()) if lad else None

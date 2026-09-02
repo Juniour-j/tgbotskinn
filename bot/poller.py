@@ -49,8 +49,12 @@ def _fmt_qty_alert(watch, name, qty, depth, item) -> str:
         f"зараз: {qty} шт <= ${watch['target_price']:.2f}",
     ]
     f = depth.floor(name)
+    b = depth.bulk_floor(name)
     if f is not None:
-        lines.append(f"мін ціна зараз: ${f:.2f}")
+        s = f"мін ціна зараз: ${f:.2f}"
+        if b is not None and b > f:
+            s += f" · ринок від ${b:.2f}"
+        lines.append(s)
     lad = _ladder_str(depth, name)
     if lad:
         lines.append(f"драбина: {lad}")
