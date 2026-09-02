@@ -1,15 +1,15 @@
-"""Команди Telegram-бота."""
+"""Команди й кнопки Telegram-бота."""
 from __future__ import annotations
 
 import asyncio
 import logging
 import re
 
-from aiogram import Router
+from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message
 
-from . import db, matcher
+from . import db, keyboards, matcher
 
 log = logging.getLogger("handlers")
 router = Router()
@@ -19,22 +19,99 @@ HELP = (
     "/watch <назва> <ціна> — стежити за ціною\n"
     "    напр.: /watch AWP | Asiimov (Field-Tested) 55\n"
     "/watch <назва> <ціна> x<шт> — стежити за ОБСЯГОМ:\n"
-    "    спрацює, коли буде >= <шт> лотів по ціні <= <ціна>\n"
+    "    спрацює, коли можна купити >= <шт> лотів по ціні <= <ціна>\n"
     "    напр.: /watch Sealed Dead Hand Terminal 0.44 x200\n"
     "/depth <id> — драбина цін (скільки лотів по якій ціні)\n"
     "/find <текст> — знайти точну назву скіна\n"
-    "/list — мої стеження\n"
-    "/unwatch <id> — прибрати\n"
-    "/mute <id> | /unmute <id> — сповіщення\n"
+    "/list — мої стеження (з кнопками)\n"
+    "/unwatch <id> · /mute <id> · /unmute <id>\n"
     "/whoami — мій Telegram id\n\n"
-    "Ціни в доларах. Ціна перевіряється ~щохвилини, глибина — раз на ~15 хв.\n"
+    "Ціна = як на сайті. Перевірка ~щохвилини, глибина — раз на ~10 хв.\n"
     "Сповіщення приходить один раз; знову спрацює, якщо умова знову перестане й почне виконуватись."
 )
 
 _QTY_RE = re.compile(r"^[xхXХ*](\d+)$")
 
 
-@router.message(Command("start", "help"))
+# ---------- спільні білдери ----------
+
+async def _list_view(user_id: int, client, depth):
+    rows = await db.list_watches(user_id)
+    if not rows:
+        return "Порожньо. Додай через /watch.", None
+    out = []
+    for r in rows:
+        state = " [muted]" if r["muted"] else (" [спрацював]" if r["triggered"] else "")
+        name = r["skin_name"]
+        item = client.lookup(name)
+        sp = depth.site_price(name)
+        if sp is not None:
+            now = f"${sp:.2f}"
+        elif item is not None:
+            now = f"${item.price:.2f}~"
+        elif r["last_price"] is not None:
+            now = f"${r['last_price']:.2f}~"
+        else:
+            now = "?"
+        if r["min_qty"] > 1:
+            have = depth.buyable_qty(name, r["target_price"])
+            have_s = f"{have} шт" if have is not None else "?"
+            fp = depth.fill_price(name, r["min_qty"])
+            fp_s = f", {r['min_qty']} шт від ${fp:.2f}" if fp is not None else ""
+            tail = (f"зараз {now}; по <= ${r['target_price']:.2f}: {have_s} "
+                    f"(треба x{r['min_qty']}){fp_s}")
+        else:
+            tail = f"зараз {now}, ціль <= ${r['target_price']:.2f}"
+        out.append(f"#{r['id']}  {name}  —  {tail}{state}")
+    return "\n".join(out), keyboards.list_kb(rows)
+
+
+async def _depth_view(user_id: int, wid: int, client, depth):
+    w = await db.get_watch(user_id, wid)
+    if w is None:
+        return f"Немає стеження #{wid}.", None
+    name = w["skin_name"]
+    if not depth.has(name):
+        asyncio.create_task(_kick_depth(depth))
+        return (f"Глибина для «{name}» ще не завантажена.\n"
+                "Оновлюється раз на ~10 хв. Спробуй за хвилину."), keyboards.depth_kb(wid)
+    sp = depth.site_price(name)
+    rungs = depth.ladder(name, 12, from_price=sp)
+    out = [name]
+    if sp is not None:
+        out.append(f"ціна на сайті: ${sp:.2f}")
+    out += [f"глибина оновлена {depth.age_min()} хв тому", "", "ціна    шт     сумарно"]
+    cum = 0
+    for p, q in rungs:
+        cum += q
+        out.append(f"${p:<6.2f} {q:<6} {cum}")
+    q_want = w["min_qty"] if w["min_qty"] > 1 else 50
+    fill = depth.fill_price(name, q_want)
+    have = depth.buyable_qty(name, w["target_price"])
+    out.append("")
+    if fill is not None:
+        out.append(f"{q_want} шт набрати від: ${fill:.2f}")
+    out.append(f"по <= ${w['target_price']:.2f}: {have} шт (ціль x{w['min_qty']})")
+    return "\n".join(out), keyboards.depth_kb(wid)
+
+
+async def _kick_depth(depth):
+    try:
+        names = await db.watched_names()
+        if names:
+            await depth.refresh(names)
+    except Exception:
+        log.exception("ad-hoc depth refresh failed")
+
+
+# ---------- команди ----------
+
+@router.message(Command("start"))
+async def cmd_start(message: Message):
+    await message.answer(HELP, reply_markup=keyboards.MAIN_KB)
+
+
+@router.message(Command("help"))
 async def cmd_help(message: Message):
     await message.answer(HELP)
 
@@ -101,10 +178,7 @@ async def cmd_watch(message: Message, command: CommandObject, client, depth):
         return
 
     verb = "Стежу" if action == "created" else "Оновив"
-    lines = [
-        f"{verb} [#{wid}]: {canonical}",
-        f"Ціль: <= ${price:.2f}",
-    ]
+    lines = [f"{verb} [#{wid}]: {canonical}", f"Ціль: <= ${price:.2f}"]
 
     sp = depth.site_price(canonical)
     if sp is not None:
@@ -127,15 +201,6 @@ async def cmd_watch(message: Message, command: CommandObject, client, depth):
     await message.answer("\n".join(lines))
 
 
-async def _kick_depth(depth):
-    try:
-        names = await db.watched_names()
-        if names:
-            await depth.refresh(names)
-    except Exception:
-        log.exception("ad-hoc depth refresh failed")
-
-
 @router.message(Command("depth"))
 async def cmd_depth(message: Message, command: CommandObject, client, depth):
     try:
@@ -143,36 +208,8 @@ async def cmd_depth(message: Message, command: CommandObject, client, depth):
     except ValueError:
         await message.answer("Формат: /depth <id> (id з /list)")
         return
-    w = await db.get_watch(message.from_user.id, wid)
-    if w is None:
-        await message.answer(f"Немає стеження #{wid}.")
-        return
-    name = w["skin_name"]
-    if not depth.has(name):
-        await message.answer(
-            f"Глибина для «{name}» ще не завантажена.\n"
-            "Оновлюється раз на ~10 хв. Спробуй за хвилину."
-        )
-        asyncio.create_task(_kick_depth(depth))
-        return
-    sp = depth.site_price(name)
-    rungs = depth.ladder(name, 12, from_price=sp)
-    cum = 0
-    out = [name]
-    if sp is not None:
-        out.append(f"ціна на сайті: ${sp:.2f}")
-    out += [f"глибина оновлена {depth.age_min()} хв тому", "", "ціна    шт     сумарно"]
-    for p, q in rungs:
-        cum += q
-        out.append(f"${p:<6.2f} {q:<6} {cum}")
-    q_want = w["min_qty"] if w["min_qty"] > 1 else 50
-    fill = depth.fill_price(name, q_want)
-    have = depth.buyable_qty(name, w["target_price"])
-    out.append("")
-    if fill is not None:
-        out.append(f"{q_want} шт набрати від: ${fill:.2f}")
-    out.append(f"по <= ${w['target_price']:.2f}: {have} шт (ціль x{w['min_qty']})")
-    await message.answer("\n".join(out))
+    text, kb = await _depth_view(message.from_user.id, wid, client, depth)
+    await message.answer(text, reply_markup=kb)
 
 
 @router.message(Command("find"))
@@ -191,41 +228,8 @@ async def cmd_find(message: Message, command: CommandObject, client):
 
 @router.message(Command("list"))
 async def cmd_list(message: Message, client, depth):
-    rows = await db.list_watches(message.from_user.id)
-    if not rows:
-        await message.answer("Порожньо. Додай через /watch.")
-        return
-    out = []
-    for r in rows:
-        if r["muted"]:
-            state = " [muted]"
-        elif r["triggered"]:
-            state = " [спрацював]"
-        else:
-            state = ""
-        name = r["skin_name"]
-        item = client.lookup(name)
-        sp = depth.site_price(name)
-        if sp is not None:
-            now = f"${sp:.2f}"
-        elif item is not None:
-            now = f"${item.price:.2f}~"
-        elif r["last_price"] is not None:
-            now = f"${r['last_price']:.2f}~"
-        else:
-            now = "?"
-
-        if r["min_qty"] > 1:
-            have = depth.buyable_qty(name, r["target_price"])
-            have_s = f"{have} шт" if have is not None else "?"
-            fp = depth.fill_price(name, r["min_qty"])
-            fp_s = f", {r['min_qty']} шт від ${fp:.2f}" if fp is not None else ""
-            tail = (f"зараз {now}; по <= ${r['target_price']:.2f}: {have_s} "
-                    f"(треба x{r['min_qty']}){fp_s}")
-        else:
-            tail = f"зараз {now}, ціль <= ${r['target_price']:.2f}"
-        out.append(f"#{r['id']}  {name}  —  {tail}{state}")
-    await message.answer("\n".join(out))
+    text, kb = await _list_view(message.from_user.id, client, depth)
+    await message.answer(text, reply_markup=kb)
 
 
 def _parse_id(args: str | None) -> int:
@@ -263,3 +267,65 @@ async def cmd_unmute(message: Message, command: CommandObject):
         return
     ok = await db.set_muted(message.from_user.id, wid, False)
     await message.answer(f"Увімкнув #{wid}." if ok else f"Немає стеження #{wid}.")
+
+
+# ---------- нижня клавіатура ----------
+
+@router.message(F.text == "📋 Список")
+async def kb_list(message: Message, client, depth):
+    text, kb = await _list_view(message.from_user.id, client, depth)
+    await message.answer(text, reply_markup=kb)
+
+
+@router.message(F.text == "❓ Довідка")
+async def kb_help(message: Message):
+    await message.answer(HELP)
+
+
+# ---------- інлайн-кнопки ----------
+
+@router.callback_query()
+async def on_callback(cb: CallbackQuery, client, depth):
+    if cb.message is None:
+        await cb.answer()
+        return
+    data = cb.data or ""
+    action, _, sid = data.partition(":")
+    try:
+        wid = int(sid)
+    except ValueError:
+        await cb.answer()
+        return
+    uid = cb.from_user.id
+
+    if action == "lst":
+        text, kb = await _list_view(uid, client, depth)
+        await cb.message.answer(text, reply_markup=kb)
+        await cb.answer()
+        return
+
+    if action == "dep":
+        text, kb = await _depth_view(uid, wid, client, depth)
+        await cb.message.answer(text, reply_markup=kb)
+        await cb.answer()
+        return
+
+    if action == "del":
+        ok = await db.remove_watch(uid, wid)
+        note = "прибрано" if ok else "нема такого"
+    elif action == "mut":
+        ok = await db.set_muted(uid, wid, True)
+        note = "стишено" if ok else "нема такого"
+    elif action == "unm":
+        ok = await db.set_muted(uid, wid, False)
+        note = "увімкнено" if ok else "нема такого"
+    else:
+        await cb.answer()
+        return
+
+    text, kb = await _list_view(uid, client, depth)
+    try:
+        await cb.message.edit_text(text, reply_markup=kb)
+    except Exception:
+        await cb.message.answer(text, reply_markup=kb)
+    await cb.answer(f"#{wid} {note}")

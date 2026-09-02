@@ -33,7 +33,9 @@ async def main():
     dp["client"] = client
     dp["depth"] = depth
     if cfg.allowed_user_ids:
-        dp.message.outer_middleware(AccessMiddleware(cfg.allowed_user_ids))
+        mw = AccessMiddleware(cfg.allowed_user_ids)
+        dp.message.outer_middleware(mw)
+        dp.callback_query.outer_middleware(mw)
         log.info("access limited to %d user(s)", len(cfg.allowed_user_ids))
     dp.include_router(router)
 
