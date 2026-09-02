@@ -32,22 +32,30 @@ class DepthIndex:
         )
         self._ladders: dict[str, dict[float, int]] = {}  # name -> {price: qty}
         self.updated_at: float = 0.0
+        self._etag: str | None = None
+        self._indexed: set = set()  # назви, що були в останньому успішному парсингу
         self._lock: asyncio.Lock | None = None
 
     async def refresh(self, names) -> bool:
         names = {n for n in names if n}
         if not names:
             self._ladders = {}
+            self._indexed = set()
             return False
         if self._lock is None:
             self._lock = asyncio.Lock()
         async with self._lock:
             fresh = 0 <= (time.time() - self.updated_at) <= _FRESH_S
-            if fresh and names <= self._ladders.keys():
+            if fresh and names <= self._indexed:
                 return True
             return await self._do_refresh(names)
 
     async def _do_refresh(self, names: set) -> bool:
+        # If-None-Match можна слати, тільки якщо всі потрібні назви вже проіндексовані
+        headers = {}
+        if self._etag and names <= self._indexed:
+            headers["If-None-Match"] = self._etag
+
         counters = {n: collections.Counter() for n in names}
 
         @ijson.coroutine
@@ -67,13 +75,17 @@ class DepthIndex:
 
         parser = ijson.items_coro(sink(), "items.item")
         try:
-            async with self._http.stream("GET", self._url) as r:
+            async with self._http.stream("GET", self._url, headers=headers) as r:
+                if r.status_code == 304:
+                    self.updated_at = time.time()  # дані підтверджено актуальними
+                    return True
                 if r.status_code != 200:
                     log.warning("full export status %s", r.status_code)
                     return False
                 async for chunk in r.aiter_bytes():
                     parser.send(chunk)
             parser.close()
+            new_etag = r.headers.get("ETag")
         except httpx.HTTPError as e:
             log.warning("depth fetch failed: %s", e or type(e).__name__)
             return False
@@ -82,6 +94,8 @@ class DepthIndex:
             return False
 
         self._ladders = {n: dict(c) for n, c in counters.items() if c}
+        self._indexed = set(names)
+        self._etag = new_etag or self._etag
         self.updated_at = time.time()
         log.info("depth updated: %d/%d names", len(self._ladders), len(names))
         return True
