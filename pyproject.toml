@@ -1,0 +1,9 @@
+[project]
+name = "lis-price-bot"
+version = "1.0.0"
+description = "Telegram-бот сповіщень про ціни скінів на lis-skins.com"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

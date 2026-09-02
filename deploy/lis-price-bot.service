@@ -1,0 +1,16 @@
+[Unit]
+Description=lis-price-bot (Telegram price alerts for lis-skins.com)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/lis-price-bot
+ExecStart=/home/ubuntu/lis-price-bot/.venv/bin/python -m bot
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
