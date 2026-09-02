@@ -192,7 +192,9 @@ async def cmd_list(message: Message, client, depth):
         if r["min_qty"] > 1:
             have = depth.qty_at_or_below(name, r["target_price"])
             have_s = f"{have} шт" if have is not None else "?"
-            tail = f"обсяг: {have_s} по <= ${r['target_price']:.2f} (треба x{r['min_qty']})"
+            now_s = f", зараз від ${item.price:.2f}" if item is not None else ""
+            tail = (f"обсяг: {have_s} по <= ${r['target_price']:.2f} "
+                    f"(треба x{r['min_qty']}){now_s}")
         elif item is not None:
             tail = f"зараз ${item.price:.2f} ({item.count} шт), ціль <= ${r['target_price']:.2f}"
         elif r["last_price"] is not None:

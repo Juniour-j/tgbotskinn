@@ -28,18 +28,20 @@ def _fmt_price_alert(watch, item) -> str:
     return "\n".join(lines)
 
 
-def _fmt_qty_alert(watch, name, qty, depth, url) -> str:
+def _fmt_qty_alert(watch, name, qty, depth, item) -> str:
     lines = [
         "Обсяг зібрався",
         name,
         f"ціль: <= ${watch['target_price']:.2f}, треба >= {watch['min_qty']} шт",
         f"зараз: {qty} шт <= ${watch['target_price']:.2f}",
     ]
+    if item is not None:
+        lines.append(f"мін ціна зараз: ${item.price:.2f}")
     lad = _ladder_str(depth, name)
     if lad:
         lines.append(f"драбина: {lad}")
-    if url:
-        lines.append(url)
+    if item is not None and item.url:
+        lines.append(item.url)
     age = depth.age_min()
     if age >= 0:
         lines.append(f"(глибина оновлена {age} хв тому)")
@@ -60,9 +62,8 @@ async def _cycle(bot, client, depth):
             price_now = item.price if item else None
             if met and not w["triggered"]:
                 if not w["muted"]:
-                    url = item.url if item else ""
                     try:
-                        await bot.send_message(w["chat_id"], _fmt_qty_alert(w, name, qty, depth, url))
+                        await bot.send_message(w["chat_id"], _fmt_qty_alert(w, name, qty, depth, item))
                     except Exception:
                         log.exception("send failed for watch %s", w["id"])
                     await asyncio.sleep(0.05)
