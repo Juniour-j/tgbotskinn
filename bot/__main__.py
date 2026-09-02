@@ -4,6 +4,7 @@ import logging
 from aiogram import Bot, Dispatcher
 
 from . import db
+from .access import AccessMiddleware
 from .config import Config
 from .handlers import router
 from .lis import LisClient
@@ -27,6 +28,9 @@ async def main():
     bot = Bot(cfg.telegram_token)
     dp = Dispatcher()
     dp["client"] = client
+    if cfg.allowed_user_ids:
+        dp.message.outer_middleware(AccessMiddleware(cfg.allowed_user_ids))
+        log.info("access limited to %d user(s)", len(cfg.allowed_user_ids))
     dp.include_router(router)
 
     poller = asyncio.create_task(run_poller(bot, client, cfg))

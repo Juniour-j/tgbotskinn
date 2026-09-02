@@ -11,6 +11,16 @@ load_dotenv()
 DEFAULT_EXPORT_URL = "https://lis-skins.com/market_export_json/csgo.json"
 
 
+def _parse_ids(raw: str) -> frozenset[int]:
+    out = set()
+    for chunk in raw.replace(",", " ").split():
+        try:
+            out.add(int(chunk))
+        except ValueError:
+            continue
+    return frozenset(out)
+
+
 @dataclass
 class Config:
     telegram_token: str
@@ -18,6 +28,7 @@ class Config:
     poll_interval: int = 60
     lis_export_url: str = DEFAULT_EXPORT_URL
     http_timeout: float = 30.0
+    allowed_user_ids: frozenset[int] = frozenset()
 
     @classmethod
     def load(cls) -> "Config":
@@ -30,4 +41,5 @@ class Config:
             poll_interval=int(os.environ.get("POLL_INTERVAL", "60")),
             lis_export_url=os.environ.get("LIS_EXPORT_URL", DEFAULT_EXPORT_URL),
             http_timeout=float(os.environ.get("HTTP_TIMEOUT", "30")),
+            allowed_user_ids=_parse_ids(os.environ.get("ALLOWED_USER_IDS", "")),
         )

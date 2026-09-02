@@ -19,7 +19,8 @@ HELP = (
     "/find <текст> — знайти точну назву скіна\n"
     "/list — мої стеження\n"
     "/unwatch <id> — прибрати стеження\n"
-    "/mute <id> | /unmute <id> — вимкнути / увімкнути сповіщення\n\n"
+    "/mute <id> | /unmute <id> — вимкнути / увімкнути сповіщення\n"
+    "/whoami — мій Telegram id\n\n"
     "Ціни в доларах. Перевірка кожні ~60 секунд.\n"
     "Сповіщення приходить один раз; знову спрацює, якщо ціна підніметься вище цілі й потім знову впаде."
 )
@@ -28,6 +29,11 @@ HELP = (
 @router.message(Command("start", "help"))
 async def cmd_help(message: Message):
     await message.answer(HELP)
+
+
+@router.message(Command("whoami"))
+async def cmd_whoami(message: Message):
+    await message.answer(f"твій Telegram id: {message.from_user.id}")
 
 
 def _parse_name_price(args: str) -> tuple[str, float]:
