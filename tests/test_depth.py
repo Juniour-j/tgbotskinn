@@ -38,6 +38,24 @@ def test_floor_count_and_ladder():
     assert d.ladder("Case A", 3) == [(0.28, 2), (0.32, 1), (0.42, 36)]
 
 
+def test_site_price_skips_fresh_bottom_before_gap():
+    cfg = types.SimpleNamespace(full_export_url="http://x", http_timeout=30.0)
+    d = DepthIndex(cfg)
+    # 11 свіжих лотів на $0.28, потім розрив до реального ринку $0.37+
+    d._ladders = {"X": {0.28: 11, 0.37: 2, 0.40: 220, 0.41: 180, 0.44: 2311}}
+    assert d.site_price("X") == 0.37
+
+    # чистий ринок — флор одразу вагомий
+    d._ladders = {"Y": {0.44: 2311, 0.48: 5000}}
+    assert d.site_price("Y") == 0.44
+
+    # тонкий флор, але без розриву — лишаємо
+    d._ladders = {"Z": {0.54: 5, 0.56: 40, 0.57: 1790}}
+    assert d.site_price("Z") == 0.54
+
+    assert d.site_price("Nope") is None
+
+
 def test_fill_price():
     d = _idx()
     # ladder: 0.28:2, 0.32:1, 0.42:36, 0.44:2287, 0.48:5093

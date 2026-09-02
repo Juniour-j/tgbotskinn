@@ -20,10 +20,10 @@ def _ladder_str(depth, name: str, limit: int = 6) -> str:
 
 
 def _eff_price(depth, item, name: str):
-    """Актуальна мін ціна: спершу з повного експорту, інакше з csgo.json."""
-    f = depth.floor(name)
-    if f is not None:
-        return f, False  # (ціна, чи_приблизна)
+    """Ціна як на сайті: з повного експорту, інакше орієнтовно з csgo.json."""
+    sp = depth.site_price(name)
+    if sp is not None:
+        return sp, False  # (ціна, чи_приблизна)
     if item is not None:
         return item.price, True
     return None, True
@@ -48,11 +48,11 @@ def _fmt_qty_alert(watch, name, qty, depth, item) -> str:
         f"ціль: <= ${watch['target_price']:.2f}, треба >= {watch['min_qty']} шт",
         f"зараз: {qty} шт <= ${watch['target_price']:.2f}",
     ]
-    f = depth.floor(name)
+    sp = depth.site_price(name)
     fp = depth.fill_price(name, watch["min_qty"])
-    if f is not None:
-        s = f"мін ціна зараз: ${f:.2f}"
-        if fp is not None and fp > f:
+    if sp is not None:
+        s = f"ціна на сайті: ${sp:.2f}"
+        if fp is not None and fp > sp:
             s += f" · {watch['min_qty']} шт від ${fp:.2f}"
         lines.append(s)
     lad = _ladder_str(depth, name)

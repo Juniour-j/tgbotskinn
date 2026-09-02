@@ -113,6 +113,23 @@ class DepthIndex:
         lad = self._ladders.get(name)
         return min(lad) if lad else None
 
+    def site_price(self, name: str):
+        """Ціна, яку показує сайт = найдешевший рівень, відкинувши поодинокі
+        свіжі лоти на самому дні (тонкий рівень перед великим стрибком ціни)."""
+        lad = self._ladders.get(name)
+        if not lad:
+            return None
+        total = sum(lad.values())
+        prices = sorted(lad)
+        for i, p in enumerate(prices):
+            if lad[p] / total >= 0.01:      # вагомий рівень — це й є ціна
+                return p
+            if i + 1 == len(prices):
+                return p
+            if (prices[i + 1] - p) / p < 0.15:  # немає великого розриву — рівень реальний
+                return p
+        return prices[-1]
+
     def fill_price(self, name: str, qty: int):
         """Найдешевша ціна, за якою можна набрати `qty` лотів (сума від дна вгору).
 
