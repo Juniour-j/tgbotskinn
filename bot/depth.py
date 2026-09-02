@@ -109,6 +109,16 @@ class DepthIndex:
             return None
         return sum(q for p, q in lad.items() if p <= price + 1e-9)
 
+    def buyable_qty(self, name: str, max_price: float):
+        """Скільки лотів реально купити по <= max_price (як «Filters match» у
+        Bulk Buy на сайті): рахуємо від ціни сайту вгору, дно-сміття не рахуємо."""
+        lad = self._ladders.get(name)
+        if lad is None:
+            return None
+        lo = self.site_price(name) or 0.0
+        return sum(q for p, q in lad.items()
+                   if lo - 1e-9 <= p <= max_price + 1e-9)
+
     def floor(self, name: str):
         lad = self._ladders.get(name)
         return min(lad) if lad else None
@@ -150,11 +160,15 @@ class DepthIndex:
         lad = self._ladders.get(name)
         return sum(lad.values()) if lad else None
 
-    def ladder(self, name: str, limit: int = 8):
+    def ladder(self, name: str, limit: int = 8, from_price=None):
         lad = self._ladders.get(name)
         if not lad:
             return []
-        return sorted(lad.items())[:limit]
+        items = sorted(
+            (p, q) for p, q in lad.items()
+            if from_price is None or p >= from_price - 1e-9
+        )
+        return items[:limit]
 
     def age_min(self) -> int:
         return int((time.time() - self.updated_at) // 60) if self.updated_at else -1

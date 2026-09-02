@@ -114,7 +114,7 @@ async def cmd_watch(message: Message, command: CommandObject, client, depth):
         asyncio.create_task(_kick_depth(depth))
 
     if qty > 1:
-        have = depth.qty_at_or_below(canonical, price)
+        have = depth.buyable_qty(canonical, price)
         if have is not None:
             fp = depth.fill_price(canonical, qty)
             fp_s = f", {qty} шт від ${fp:.2f}" if fp is not None else ""
@@ -156,7 +156,7 @@ async def cmd_depth(message: Message, command: CommandObject, client, depth):
         asyncio.create_task(_kick_depth(depth))
         return
     sp = depth.site_price(name)
-    rungs = depth.ladder(name, 12)
+    rungs = depth.ladder(name, 12, from_price=sp)
     cum = 0
     out = [name]
     if sp is not None:
@@ -167,7 +167,7 @@ async def cmd_depth(message: Message, command: CommandObject, client, depth):
         out.append(f"${p:<6.2f} {q:<6} {cum}")
     q_want = w["min_qty"] if w["min_qty"] > 1 else 50
     fill = depth.fill_price(name, q_want)
-    have = depth.qty_at_or_below(name, w["target_price"])
+    have = depth.buyable_qty(name, w["target_price"])
     out.append("")
     if fill is not None:
         out.append(f"{q_want} шт набрати від: ${fill:.2f}")
@@ -216,7 +216,7 @@ async def cmd_list(message: Message, client, depth):
             now = "?"
 
         if r["min_qty"] > 1:
-            have = depth.qty_at_or_below(name, r["target_price"])
+            have = depth.buyable_qty(name, r["target_price"])
             have_s = f"{have} шт" if have is not None else "?"
             fp = depth.fill_price(name, r["min_qty"])
             fp_s = f", {r['min_qty']} шт від ${fp:.2f}" if fp is not None else ""

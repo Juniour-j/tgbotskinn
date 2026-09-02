@@ -15,7 +15,7 @@ log = logging.getLogger("poller")
 
 
 def _ladder_str(depth, name: str, limit: int = 6) -> str:
-    rungs = depth.ladder(name, limit)
+    rungs = depth.ladder(name, limit, from_price=depth.site_price(name))
     return " · ".join(f"${p:.2f}×{q}" for p, q in rungs)
 
 
@@ -74,7 +74,7 @@ async def _cycle(bot, client, depth):
         price, approx = _eff_price(depth, item, name)
 
         if min_qty > 1:
-            qty = depth.qty_at_or_below(name, w["target_price"])
+            qty = depth.buyable_qty(name, w["target_price"])
             if qty is None:
                 continue  # глибина для цієї назви ще не завантажена
             met = qty >= min_qty

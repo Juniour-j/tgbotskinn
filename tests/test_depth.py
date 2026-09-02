@@ -24,6 +24,18 @@ def test_qty_at_or_below():
     assert d.qty_at_or_below("Case A", 1.00) == 7419
 
 
+def test_buyable_qty_excludes_dust_below_site_price():
+    cfg = types.SimpleNamespace(full_export_url="http://x", http_timeout=30.0)
+    d = DepthIndex(cfg)
+    # site_price тут = 0.40 (0.28×6 — сміття перед розривом)
+    d._ladders = {"C": {0.28: 6, 0.40: 12, 0.41: 180, 0.44: 2000}}
+    assert d.site_price("C") == 0.40
+    assert d.buyable_qty("C", 0.38) == 0        # як «Filters match 0» на сайті
+    assert d.buyable_qty("C", 0.41) == 12 + 180
+    assert d.buyable_qty("C", 1.0) == 12 + 180 + 2000
+    assert d.buyable_qty("Nope", 1.0) is None
+
+
 def test_unknown_name_returns_none():
     d = _idx()
     assert d.qty_at_or_below("Nope", 1.0) is None
