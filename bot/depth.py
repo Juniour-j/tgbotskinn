@@ -113,18 +113,21 @@ class DepthIndex:
         lad = self._ladders.get(name)
         return min(lad) if lad else None
 
-    def bulk_floor(self, name: str):
-        """Найдешевша ціна з реальним обсягом — перший «товстий» рівень.
+    def fill_price(self, name: str, qty: int):
+        """Найдешевша ціна, за якою можна набрати `qty` лотів (сума від дна вгору).
 
-        Відсікає поодинокі свіжі/зовнішні лоти на дні (1-30 шт), які на сайті
-        ще не видно. Поріг — 1% усіх лотів або 20, що більше.
+        Тобто «щоб купити N штук, платиш не більше цієї ціни за штуку».
+        None, якщо на ринку менше, ніж qty, лотів.
         """
         lad = self._ladders.get(name)
-        if not lad:
+        if not lad or qty < 1:
             return None
-        thr = max(20, sum(lad.values()) // 100)
-        fat = [p for p, q in lad.items() if q >= thr]
-        return min(fat) if fat else min(lad)
+        cum = 0
+        for p in sorted(lad):
+            cum += lad[p]
+            if cum >= qty:
+                return p
+        return None
 
     def count(self, name: str):
         lad = self._ladders.get(name)

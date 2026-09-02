@@ -38,11 +38,16 @@ def test_floor_count_and_ladder():
     assert d.ladder("Case A", 3) == [(0.28, 2), (0.32, 1), (0.42, 36)]
 
 
-def test_bulk_floor_skips_thin_bottom():
+def test_fill_price():
     d = _idx()
-    # total 7419 -> thr = max(20, 74) = 74; перший рівень >= 74 це $0.44 (2287)
-    assert d.bulk_floor("Case A") == 0.44
-    assert d.bulk_floor("Nope") is None
+    # ladder: 0.28:2, 0.32:1, 0.42:36, 0.44:2287, 0.48:5093
+    assert d.fill_price("Case A", 1) == 0.28
+    assert d.fill_price("Case A", 3) == 0.32
+    assert d.fill_price("Case A", 40) == 0.44      # 2+1+36=39 < 40 -> наступний рівень
+    assert d.fill_price("Case A", 39) == 0.42
+    assert d.fill_price("Case A", 100) == 0.44
+    assert d.fill_price("Case A", 10_000) is None  # усього ~7419
+    assert d.fill_price("Nope", 1) is None
 
 
 @pytest.mark.parametrize("raw,expected", [

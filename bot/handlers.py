@@ -107,8 +107,9 @@ async def cmd_watch(message: Message, command: CommandObject, client, depth):
     ]
 
     d_floor = depth.floor(canonical)
-    d_bulk = depth.bulk_floor(canonical)
     d_count = depth.count(canonical)
+    fill_qty = qty if qty > 1 else 50
+    d_fill = depth.fill_price(canonical, fill_qty)
     if qty > 1:
         have = depth.qty_at_or_below(canonical, price)
         if have is None:
@@ -118,8 +119,8 @@ async def cmd_watch(message: Message, command: CommandObject, client, depth):
 
     if d_floor is not None:
         s = f"Мін. ціна зараз: ${d_floor:.2f} ({d_count} шт усього)"
-        if d_bulk is not None and d_bulk > d_floor:
-            s += f"\nРинок (обсяг) від: ${d_bulk:.2f}"
+        if d_fill is not None and d_fill > d_floor:
+            s += f"\n{fill_qty} шт набрати від: ${d_fill:.2f}"
         lines.append(s)
     elif item is not None:
         lines.append(f"Мін. ціна зараз: ${item.price:.2f} (орієнтовно, уточниться за хвилину)")
@@ -165,11 +166,12 @@ async def cmd_depth(message: Message, command: CommandObject, client, depth):
     for p, q in rungs:
         cum += q
         out.append(f"${p:<6.2f} {q:<6} {cum}")
-    bulk = depth.bulk_floor(name)
+    q_want = w["min_qty"] if w["min_qty"] > 1 else 50
+    fill = depth.fill_price(name, q_want)
     have = depth.qty_at_or_below(name, w["target_price"])
     out.append("")
-    if bulk is not None:
-        out.append(f"ринок (обсяг) від: ${bulk:.2f}")
+    if fill is not None:
+        out.append(f"{q_want} шт набрати від: ${fill:.2f}")
     out.append(f"по <= ${w['target_price']:.2f}: {have} шт (ціль x{w['min_qty']})")
     await message.answer("\n".join(out))
 
@@ -205,20 +207,22 @@ async def cmd_list(message: Message, client, depth):
         name = r["skin_name"]
         item = client.lookup(name)
         d_floor = depth.floor(name)
-        d_bulk = depth.bulk_floor(name)
         d_count = depth.count(name)
 
         if r["min_qty"] > 1:
             have = depth.qty_at_or_below(name, r["target_price"])
             have_s = f"{have} шт" if have is not None else "?"
-            market = f"ринок від ${d_bulk:.2f}" if d_bulk is not None else ""
+            fp = depth.fill_price(name, r["min_qty"])
+            fp_s = (f", {r['min_qty']} шт від ${fp:.2f}" if fp is not None
+                    else f", на ринку < {r['min_qty']} шт")
             tail = (f"обсяг: {have_s} по <= ${r['target_price']:.2f} "
-                    f"(треба x{r['min_qty']})" + (f", {market}" if market else ""))
+                    f"(треба x{r['min_qty']}){fp_s}")
         else:
             if d_floor is not None:
                 now = f"${d_floor:.2f} ({d_count} шт)"
-                if d_bulk is not None and d_bulk > d_floor:
-                    now += f", обсяг з ${d_bulk:.2f}"
+                fp = depth.fill_price(name, 50)
+                if fp is not None and fp > d_floor:
+                    now += f", 50 шт від ${fp:.2f}"
             elif item is not None:
                 now = f"${item.price:.2f} (~)"
             elif r["last_price"] is not None:
