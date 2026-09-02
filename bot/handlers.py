@@ -1,7 +1,9 @@
 """Команди Telegram-бота."""
 from __future__ import annotations
 
+import asyncio
 import logging
+import re
 
 from aiogram import Router
 from aiogram.filters import Command, CommandObject
@@ -14,16 +16,22 @@ router = Router()
 
 HELP = (
     "Стежу за цінами скінів на lis-skins.com (CS2).\n\n"
-    "/watch <назва> <ціна> — почати стежити\n"
+    "/watch <назва> <ціна> — стежити за ціною\n"
     "    напр.: /watch AWP | Asiimov (Field-Tested) 55\n"
+    "/watch <назва> <ціна> x<шт> — стежити за ОБСЯГОМ:\n"
+    "    спрацює, коли буде >= <шт> лотів по ціні <= <ціна>\n"
+    "    напр.: /watch Sealed Dead Hand Terminal 0.44 x200\n"
+    "/depth <id> — драбина цін (скільки лотів по якій ціні)\n"
     "/find <текст> — знайти точну назву скіна\n"
     "/list — мої стеження\n"
-    "/unwatch <id> — прибрати стеження\n"
-    "/mute <id> | /unmute <id> — вимкнути / увімкнути сповіщення\n"
+    "/unwatch <id> — прибрати\n"
+    "/mute <id> | /unmute <id> — сповіщення\n"
     "/whoami — мій Telegram id\n\n"
-    "Ціни в доларах. Перевірка кожні ~60 секунд.\n"
-    "Сповіщення приходить один раз; знову спрацює, якщо ціна підніметься вище цілі й потім знову впаде."
+    "Ціни в доларах. Ціна перевіряється ~щохвилини, глибина — раз на ~15 хв.\n"
+    "Сповіщення приходить один раз; знову спрацює, якщо умова знову перестане й почне виконуватись."
 )
+
+_QTY_RE = re.compile(r"^[xхXХ*](\d+)$")
 
 
 @router.message(Command("start", "help"))
@@ -36,31 +44,38 @@ async def cmd_whoami(message: Message):
     await message.answer(f"твій Telegram id: {message.from_user.id}")
 
 
-def _parse_name_price(args: str) -> tuple[str, float]:
-    name, _, price_s = args.rpartition(" ")
-    name = name.strip()
-    if not name:
-        raise ValueError("no name")
-    price = float(price_s.strip().lstrip("$").replace(",", "."))
-    if price <= 0:
-        raise ValueError("bad price")
-    return name, price
+def _parse_watch_args(args: str) -> tuple[str, float, int]:
+    toks = args.split()
+    if len(toks) < 2:
+        raise ValueError("too few tokens")
+    qty = 1
+    m = _QTY_RE.match(toks[-1])
+    if m and len(toks) >= 3:
+        qty = int(m.group(1))
+        toks.pop()
+    price = float(toks[-1].strip().lstrip("$").replace(",", "."))
+    toks.pop()
+    name = " ".join(toks).strip()
+    if not name or price <= 0 or qty < 1:
+        raise ValueError("bad values")
+    return name, price, qty
 
 
 @router.message(Command("watch"))
-async def cmd_watch(message: Message, command: CommandObject, client):
+async def cmd_watch(message: Message, command: CommandObject, client, depth):
     if not client.ready():
         await message.answer("Каталог ще вантажиться, спробуй за хвилину.")
         return
     if not command.args:
-        await message.answer("Формат: /watch <назва> <ціна>")
+        await message.answer("Формат: /watch <назва> <ціна> [x<шт>]")
         return
     try:
-        name, price = _parse_name_price(command.args)
+        name, price, qty = _parse_watch_args(command.args)
     except ValueError:
         await message.answer(
-            "Формат: /watch <назва> <ціна>\n"
-            "напр.: /watch AWP | Asiimov (Field-Tested) 55"
+            "Формат: /watch <назва> <ціна> [x<шт>]\n"
+            "напр.: /watch AWP | Asiimov (Field-Tested) 55\n"
+            "       /watch Sealed Dead Hand Terminal 0.44 x200"
         )
         return
 
@@ -78,17 +93,70 @@ async def cmd_watch(message: Message, command: CommandObject, client):
         return
 
     item = client.lookup(canonical)
-    wid = await db.add_watch(message.from_user.id, message.chat.id, canonical, price)
+    wid, action = await db.add_watch(
+        message.from_user.id, message.chat.id, canonical, price, min_qty=qty
+    )
     if wid is None:
-        await message.answer("Таке стеження вже є (див. /list).")
+        await message.answer("Не вдалося зберегти стеження.")
         return
 
-    extra = "" if exact else "\n(підібрав за схожістю)"
-    await message.answer(
-        f"Стежу [#{wid}]: {canonical}\n"
-        f"Ціль: <= ${price:.2f}\n"
-        f"Зараз: ${item.price:.2f} ({item.count} шт){extra}"
-    )
+    verb = "Стежу" if action == "created" else "Оновив"
+    lines = [
+        f"{verb} [#{wid}]: {canonical}",
+        f"Ціль: <= ${price:.2f}",
+    ]
+    if qty > 1:
+        have = depth.qty_at_or_below(canonical, price)
+        if have is None:
+            lines.append(f"Треба: >= {qty} шт (глибина зʼявиться після наступного оновлення)")
+            asyncio.create_task(_kick_depth(depth))
+        else:
+            lines.append(f"Треба: >= {qty} шт (зараз по <= ${price:.2f}: {have} шт)")
+    if item is not None:
+        lines.append(f"Мін. ціна зараз: ${item.price:.2f} ({item.count} шт усього)")
+    if not exact:
+        lines.append("(підібрав за схожістю)")
+    await message.answer("\n".join(lines))
+
+
+async def _kick_depth(depth):
+    try:
+        names = await db.qty_watch_names()
+        if names:
+            await depth.refresh(names)
+    except Exception:
+        log.exception("ad-hoc depth refresh failed")
+
+
+@router.message(Command("depth"))
+async def cmd_depth(message: Message, command: CommandObject, client, depth):
+    try:
+        wid = int((command.args or "").strip())
+    except ValueError:
+        await message.answer("Формат: /depth <id> (id з /list)")
+        return
+    w = await db.get_watch(message.from_user.id, wid)
+    if w is None:
+        await message.answer(f"Немає стеження #{wid}.")
+        return
+    name = w["skin_name"]
+    if not depth.has(name):
+        await message.answer(
+            f"Глибина для «{name}» ще не завантажена.\n"
+            "Оновлюється раз на ~15 хв і лише для стежень з x<шт>. Спробуй пізніше."
+        )
+        asyncio.create_task(_kick_depth(depth))
+        return
+    rungs = depth.ladder(name, 12)
+    cum = 0
+    out = [name, f"глибина оновлена {depth.age_min()} хв тому", "", "ціна    шт     сумарно"]
+    for p, q in rungs:
+        cum += q
+        out.append(f"${p:<6.2f} {q:<6} {cum}")
+    have = depth.qty_at_or_below(name, w["target_price"])
+    out.append("")
+    out.append(f"по <= ${w['target_price']:.2f}: {have} шт (ціль x{w['min_qty']})")
+    await message.answer("\n".join(out))
 
 
 @router.message(Command("find"))
@@ -106,7 +174,7 @@ async def cmd_find(message: Message, command: CommandObject, client):
 
 
 @router.message(Command("list"))
-async def cmd_list(message: Message, client):
+async def cmd_list(message: Message, client, depth):
     rows = await db.list_watches(message.from_user.id)
     if not rows:
         await message.answer("Порожньо. Додай через /watch.")
@@ -119,16 +187,19 @@ async def cmd_list(message: Message, client):
             state = " [спрацював]"
         else:
             state = ""
-        item = client.lookup(r["skin_name"])
-        if item is not None:
-            now = f", зараз ${item.price:.2f} ({item.count} шт)"
+        name = r["skin_name"]
+        item = client.lookup(name)
+        if r["min_qty"] > 1:
+            have = depth.qty_at_or_below(name, r["target_price"])
+            have_s = f"{have} шт" if have is not None else "?"
+            tail = f"обсяг: {have_s} по <= ${r['target_price']:.2f} (треба x{r['min_qty']})"
+        elif item is not None:
+            tail = f"зараз ${item.price:.2f} ({item.count} шт), ціль <= ${r['target_price']:.2f}"
         elif r["last_price"] is not None:
-            now = f", зараз ${r['last_price']:.2f}"
+            tail = f"зараз ${r['last_price']:.2f}, ціль <= ${r['target_price']:.2f}"
         else:
-            now = ""
-        out.append(
-            f"#{r['id']}  {r['skin_name']}  —  ціль <= ${r['target_price']:.2f}{now}{state}"
-        )
+            tail = f"ціль <= ${r['target_price']:.2f}"
+        out.append(f"#{r['id']}  {name}  —  {tail}{state}")
     await message.answer("\n".join(out))
 
 

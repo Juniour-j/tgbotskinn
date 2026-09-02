@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS watches (
     game         TEXT    NOT NULL DEFAULT 'csgo',
     skin_name    TEXT    NOT NULL,
     target_price REAL    NOT NULL,
+    min_qty      INTEGER NOT NULL DEFAULT 1,
     muted        INTEGER NOT NULL DEFAULT 0,
     triggered    INTEGER NOT NULL DEFAULT 0,
     last_price   REAL,
@@ -25,6 +26,11 @@ CREATE INDEX IF NOT EXISTS idx_watches_user ON watches(user_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_watches_uniq
     ON watches(user_id, game, skin_name, target_price);
 """
+
+# прості міграції для БД, створених ранішими версіями
+_MIGRATIONS = [
+    "ALTER TABLE watches ADD COLUMN min_qty INTEGER NOT NULL DEFAULT 1",
+]
 
 
 def _now() -> str:
@@ -37,6 +43,11 @@ async def init_db(path: str):
     _db.row_factory = aiosqlite.Row
     await _db.execute("PRAGMA journal_mode=WAL")
     await _db.executescript(SCHEMA)
+    for stmt in _MIGRATIONS:
+        try:
+            await _db.execute(stmt)
+        except aiosqlite.OperationalError:
+            pass  # колонка вже є
     await _db.commit()
 
 
@@ -45,19 +56,34 @@ async def close():
         await _db.close()
 
 
-async def add_watch(user_id: int, chat_id: int, skin_name: str,
-                    target_price: float, game: str = "csgo") -> int | None:
-    """id нового рядка або None, якщо таке стеження вже існує."""
+async def add_watch(user_id: int, chat_id: int, skin_name: str, target_price: float,
+                    game: str = "csgo", min_qty: int = 1):
+    """
+    Повертає (id, action), де action:
+      "created" — нове стеження,
+      "updated" — таке (user+game+skin+price) вже було, оновили min_qty.
+    """
     try:
         cur = await _db.execute(
-            "INSERT INTO watches(user_id, chat_id, game, skin_name, target_price, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (user_id, chat_id, game, skin_name, target_price, _now()),
+            "INSERT INTO watches(user_id, chat_id, game, skin_name, target_price, min_qty, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (user_id, chat_id, game, skin_name, target_price, min_qty, _now()),
         )
         await _db.commit()
-        return cur.lastrowid
+        return cur.lastrowid, "created"
     except aiosqlite.IntegrityError:
-        return None
+        await _db.execute(
+            "UPDATE watches SET min_qty=?, triggered=0 "
+            "WHERE user_id=? AND game=? AND skin_name=? AND target_price=?",
+            (min_qty, user_id, game, skin_name, target_price),
+        )
+        await _db.commit()
+        cur = await _db.execute(
+            "SELECT id FROM watches WHERE user_id=? AND game=? AND skin_name=? AND target_price=?",
+            (user_id, game, skin_name, target_price),
+        )
+        row = await cur.fetchone()
+        return (row["id"] if row else None), "updated"
 
 
 async def list_watches(user_id: int):
@@ -65,6 +91,13 @@ async def list_watches(user_id: int):
         "SELECT * FROM watches WHERE user_id=? ORDER BY id", (user_id,)
     )
     return await cur.fetchall()
+
+
+async def get_watch(user_id: int, watch_id: int):
+    cur = await _db.execute(
+        "SELECT * FROM watches WHERE user_id=? AND id=?", (user_id, watch_id)
+    )
+    return await cur.fetchone()
 
 
 async def remove_watch(user_id: int, watch_id: int) -> bool:
@@ -87,6 +120,12 @@ async def set_muted(user_id: int, watch_id: int, muted: bool) -> bool:
 async def all_watches():
     cur = await _db.execute("SELECT * FROM watches")
     return await cur.fetchall()
+
+
+async def qty_watch_names() -> set:
+    """Назви скінів з усіх стежень, де min_qty > 1 (для індексу глибини)."""
+    cur = await _db.execute("SELECT DISTINCT skin_name FROM watches WHERE min_qty > 1")
+    return {r["skin_name"] for r in await cur.fetchall()}
 
 
 async def mark_triggered(watch_id: int, price: float | None, triggered: bool):

@@ -6,9 +6,10 @@ from aiogram import Bot, Dispatcher
 from . import db
 from .access import AccessMiddleware
 from .config import Config
+from .depth import DepthIndex
 from .handlers import router
 from .lis import LisClient
-from .poller import run_poller
+from .poller import run_depth_refresher, run_poller
 
 logging.basicConfig(
     level=logging.INFO,
@@ -25,24 +26,33 @@ async def main():
     await client.refresh()
     log.info("startup catalog: %d skins", len(client.names))
 
+    depth = DepthIndex(cfg)
+
     bot = Bot(cfg.telegram_token)
     dp = Dispatcher()
     dp["client"] = client
+    dp["depth"] = depth
     if cfg.allowed_user_ids:
         dp.message.outer_middleware(AccessMiddleware(cfg.allowed_user_ids))
         log.info("access limited to %d user(s)", len(cfg.allowed_user_ids))
     dp.include_router(router)
 
-    poller = asyncio.create_task(run_poller(bot, client, cfg))
+    tasks = [
+        asyncio.create_task(run_poller(bot, client, depth, cfg)),
+        asyncio.create_task(run_depth_refresher(depth, cfg)),
+    ]
     try:
         await dp.start_polling(bot)
     finally:
-        poller.cancel()
-        try:
-            await poller
-        except asyncio.CancelledError:
-            pass
+        for t in tasks:
+            t.cancel()
+        for t in tasks:
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
         await client.aclose()
+        await depth.aclose()
         await db.close()
         await bot.session.close()
 
