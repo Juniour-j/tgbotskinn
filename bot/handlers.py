@@ -105,15 +105,23 @@ async def cmd_watch(message: Message, command: CommandObject, client, depth):
         f"{verb} [#{wid}]: {canonical}",
         f"Ціль: <= ${price:.2f}",
     ]
+
+    d_floor = depth.floor(canonical)
+    d_count = depth.count(canonical)
     if qty > 1:
         have = depth.qty_at_or_below(canonical, price)
         if have is None:
-            lines.append(f"Треба: >= {qty} шт (глибина зʼявиться після наступного оновлення)")
-            asyncio.create_task(_kick_depth(depth))
+            lines.append(f"Треба: >= {qty} шт (глибина зʼявиться за хвилину)")
         else:
             lines.append(f"Треба: >= {qty} шт (зараз по <= ${price:.2f}: {have} шт)")
-    if item is not None:
-        lines.append(f"Мін. ціна зараз: ${item.price:.2f} ({item.count} шт усього)")
+
+    if d_floor is not None:
+        lines.append(f"Мін. ціна зараз: ${d_floor:.2f} ({d_count} шт усього)")
+    elif item is not None:
+        lines.append(f"Мін. ціна зараз: ${item.price:.2f} (орієнтовно, уточниться за хвилину)")
+
+    if depth.floor(canonical) is None:
+        asyncio.create_task(_kick_depth(depth))
     if not exact:
         lines.append("(підібрав за схожістю)")
     await message.answer("\n".join(lines))
@@ -121,7 +129,7 @@ async def cmd_watch(message: Message, command: CommandObject, client, depth):
 
 async def _kick_depth(depth):
     try:
-        names = await db.qty_watch_names()
+        names = await db.watched_names()
         if names:
             await depth.refresh(names)
     except Exception:
@@ -189,18 +197,25 @@ async def cmd_list(message: Message, client, depth):
             state = ""
         name = r["skin_name"]
         item = client.lookup(name)
+        d_floor = depth.floor(name)
+        d_count = depth.count(name)
+        # актуальна ціна: з повного експорту, інакше з csgo.json, інакше last_price
+        if d_floor is not None:
+            now = f"${d_floor:.2f} ({d_count} шт)"
+        elif item is not None:
+            now = f"${item.price:.2f} (~)"
+        elif r["last_price"] is not None:
+            now = f"${r['last_price']:.2f} (~)"
+        else:
+            now = "?"
+
         if r["min_qty"] > 1:
             have = depth.qty_at_or_below(name, r["target_price"])
             have_s = f"{have} шт" if have is not None else "?"
-            now_s = f", зараз від ${item.price:.2f}" if item is not None else ""
             tail = (f"обсяг: {have_s} по <= ${r['target_price']:.2f} "
-                    f"(треба x{r['min_qty']}){now_s}")
-        elif item is not None:
-            tail = f"зараз ${item.price:.2f} ({item.count} шт), ціль <= ${r['target_price']:.2f}"
-        elif r["last_price"] is not None:
-            tail = f"зараз ${r['last_price']:.2f}, ціль <= ${r['target_price']:.2f}"
+                    f"(треба x{r['min_qty']}), зараз від {now}")
         else:
-            tail = f"ціль <= ${r['target_price']:.2f}"
+            tail = f"зараз {now}, ціль <= ${r['target_price']:.2f}"
         out.append(f"#{r['id']}  {name}  —  {tail}{state}")
     await message.answer("\n".join(out))
 

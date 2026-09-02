@@ -1,7 +1,10 @@
 """Фонові цикли:
-- price poller: раз на poll_interval звіряє ціни зі стеженнями (легкий csgo.json);
-- depth refresher: раз на depth_refresh_min оновлює індекс глибини (важкий full.json,
-  лише якщо є стеження з min_qty > 1).
+- price poller: раз на poll_interval звіряє ціни/обсяги зі стеженнями;
+- depth refresher: раз на depth_refresh_min оновлює індекс з повного експорту
+  (api_csgo_full.json) для всіх назв, що є в стеженнях.
+
+Ціна береться з повного експорту (збігається з сайтом). Короткий csgo.json —
+лише запасний варіант, поки глибина для назви ще не завантажилась.
 """
 import asyncio
 import logging
@@ -16,14 +19,24 @@ def _ladder_str(depth, name: str, limit: int = 6) -> str:
     return " · ".join(f"${p:.2f}×{q}" for p, q in rungs)
 
 
-def _fmt_price_alert(watch, item) -> str:
+def _eff_price(depth, item, name: str):
+    """Актуальна мін ціна: спершу з повного експорту, інакше з csgo.json."""
+    f = depth.floor(name)
+    if f is not None:
+        return f, False  # (ціна, чи_приблизна)
+    if item is not None:
+        return item.price, True
+    return None, True
+
+
+def _fmt_price_alert(name, target, price, approx, item) -> str:
     lines = [
         "Ціна досягнута",
-        item.name,
-        f"ціль: <= ${watch['target_price']:.2f}",
-        f"зараз: ${item.price:.2f} ({item.count} шт)",
+        name,
+        f"ціль: <= ${target:.2f}",
+        f"зараз: ${price:.2f}" + (" (орієнтовно)" if approx else ""),
     ]
-    if item.url:
+    if item is not None and item.url:
         lines.append(item.url)
     return "\n".join(lines)
 
@@ -35,8 +48,9 @@ def _fmt_qty_alert(watch, name, qty, depth, item) -> str:
         f"ціль: <= ${watch['target_price']:.2f}, треба >= {watch['min_qty']} шт",
         f"зараз: {qty} шт <= ${watch['target_price']:.2f}",
     ]
-    if item is not None:
-        lines.append(f"мін ціна зараз: ${item.price:.2f}")
+    f = depth.floor(name)
+    if f is not None:
+        lines.append(f"мін ціна зараз: ${f:.2f}")
     lad = _ladder_str(depth, name)
     if lad:
         lines.append(f"драбина: {lad}")
@@ -53,13 +67,13 @@ async def _cycle(bot, client, depth):
         name = w["skin_name"]
         item = client.lookup(name)
         min_qty = w["min_qty"] or 1
+        price, approx = _eff_price(depth, item, name)
 
         if min_qty > 1:
             qty = depth.qty_at_or_below(name, w["target_price"])
             if qty is None:
                 continue  # глибина для цієї назви ще не завантажена
             met = qty >= min_qty
-            price_now = item.price if item else None
             if met and not w["triggered"]:
                 if not w["muted"]:
                     try:
@@ -67,22 +81,24 @@ async def _cycle(bot, client, depth):
                     except Exception:
                         log.exception("send failed for watch %s", w["id"])
                     await asyncio.sleep(0.05)
-                await db.mark_triggered(w["id"], price_now, True)
+                await db.mark_triggered(w["id"], price, True)
             elif not met and w["triggered"]:
-                await db.mark_triggered(w["id"], price_now, False)
-            elif price_now is not None and price_now != w["last_price"]:
-                await db.set_last_price(w["id"], price_now)
+                await db.mark_triggered(w["id"], price, False)
+            elif price is not None and price != w["last_price"]:
+                await db.set_last_price(w["id"], price)
             continue
 
-        # звичайне стеження за ціною
-        price = item.price if item else None
+        # стеження за ціною
         decision = alerts.evaluate(w["target_price"], bool(w["triggered"]), price)
         if decision == "fire":
             if w["muted"]:
                 await db.set_last_price(w["id"], price)
                 continue
             try:
-                await bot.send_message(w["chat_id"], _fmt_price_alert(w, item))
+                await bot.send_message(
+                    w["chat_id"],
+                    _fmt_price_alert(name, w["target_price"], price, approx, item),
+                )
             except Exception:
                 log.exception("send failed for watch %s", w["id"])
             await db.mark_triggered(w["id"], price, True)
@@ -109,7 +125,7 @@ async def run_poller(bot, client, depth, cfg):
 async def run_depth_refresher(depth, cfg):
     while True:
         try:
-            names = await db.qty_watch_names()
+            names = await db.watched_names()
             if names:
                 await depth.refresh(names)
         except asyncio.CancelledError:

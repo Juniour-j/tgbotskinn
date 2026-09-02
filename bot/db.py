@@ -122,9 +122,9 @@ async def all_watches():
     return await cur.fetchall()
 
 
-async def qty_watch_names() -> set:
-    """Назви скінів з усіх стежень, де min_qty > 1 (для індексу глибини)."""
-    cur = await _db.execute("SELECT DISTINCT skin_name FROM watches WHERE min_qty > 1")
+async def watched_names() -> set:
+    """Усі унікальні назви скінів зі стежень (для індексу глибини/цін)."""
+    cur = await _db.execute("SELECT DISTINCT skin_name FROM watches")
     return {r["skin_name"] for r in await cur.fetchall()}
 
 

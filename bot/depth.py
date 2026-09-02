@@ -99,6 +99,10 @@ class DepthIndex:
         lad = self._ladders.get(name)
         return min(lad) if lad else None
 
+    def count(self, name: str):
+        lad = self._ladders.get(name)
+        return sum(lad.values()) if lad else None
+
     def ladder(self, name: str, limit: int = 8):
         lad = self._ladders.get(name)
         if not lad:

@@ -30,9 +30,11 @@ def test_unknown_name_returns_none():
     assert d.has("Nope") is False
 
 
-def test_floor_and_ladder():
+def test_floor_count_and_ladder():
     d = _idx()
     assert d.floor("Case A") == 0.28
+    assert d.count("Case A") == 2 + 1 + 36 + 2287 + 5093
+    assert d.count("Nope") is None
     assert d.ladder("Case A", 3) == [(0.28, 2), (0.32, 1), (0.42, 36)]
 
 
