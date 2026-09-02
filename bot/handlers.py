@@ -106,7 +106,7 @@ async def cmd_find(message: Message, command: CommandObject, client):
 
 
 @router.message(Command("list"))
-async def cmd_list(message: Message):
+async def cmd_list(message: Message, client):
     rows = await db.list_watches(message.from_user.id)
     if not rows:
         await message.answer("Порожньо. Додай через /watch.")
@@ -119,9 +119,15 @@ async def cmd_list(message: Message):
             state = " [спрацював]"
         else:
             state = ""
-        last = f", зараз ${r['last_price']:.2f}" if r["last_price"] is not None else ""
+        item = client.lookup(r["skin_name"])
+        if item is not None:
+            now = f", зараз ${item.price:.2f} ({item.count} шт)"
+        elif r["last_price"] is not None:
+            now = f", зараз ${r['last_price']:.2f}"
+        else:
+            now = ""
         out.append(
-            f"#{r['id']}  {r['skin_name']}  —  ціль <= ${r['target_price']:.2f}{last}{state}"
+            f"#{r['id']}  {r['skin_name']}  —  ціль <= ${r['target_price']:.2f}{now}{state}"
         )
     await message.answer("\n".join(out))
 
