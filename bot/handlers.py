@@ -60,6 +60,7 @@ _pending_compare: set[int] = set()      # user_id -> чекаємо назву �
 _last_search: dict[int, list] = {}      # user_id -> список знайдених назв
 _sort_mode: dict[int, str] = {}         # user_id -> "state"|"price"|"name"
 _last_deleted: dict[int, dict] = {}     # user_id -> {skin_name,target_price,min_qty,direction}
+_last_top: dict[int, list] = {}         # user_id -> назви з останнього /top
 
 
 async def _show(cb: CallbackQuery, text: str, kb, toast: str | None = None):
@@ -159,6 +160,10 @@ def _n(x) -> str:
     return f"{int(x):,}".replace(",", " ")
 
 
+def _money(x) -> str:
+    return "$" + f"{x:,.2f}".replace(",", " ")
+
+
 def _mkt_line(name: str, market, short: bool = False) -> str:
     qs = sorted(market.quotes(name), key=lambda t: t[2].price)
     return "  ·  ".join(
@@ -168,8 +173,9 @@ def _mkt_line(name: str, market, short: bool = False) -> str:
 
 
 def _state(row, met: bool) -> str:
-    if db.is_muted(row):
-        return "🔕 без звуку"
+    ml = db.muted_label(row)
+    if ml:
+        return ml
     if met:
         return "✅ ціль досягнута" + (" · сповіщено" if row["triggered"] else "")
     return "⏳ чекаю"
@@ -275,21 +281,26 @@ async def _status_view(market, client, depth):
     return "\n".join(lines), keyboards.back_kb()
 
 
-async def _top_view(market, mode: str):
+async def _top_view(uid: int, market, mode: str):
     if mode == "spread":
         rows = market.top_spread(15)
         if not rows:
-            return "<b>Топ · розкид</b>\n\nНедостатньо даних (треба 2+ ринки).", keyboards.top_kb(mode)
-        body = [f"{p:>4.0f}%  {_esc(n)}  —  {lo_l} ${lo:.2f} → {hi_l} ${hi:.2f}"
+            return ("<b>Топ · розкид</b>\n\nНедостатньо даних (треба 2+ ринки).",
+                    keyboards.top_kb(mode))
+        names = [r[0] for r in rows]
+        body = [f"{p:>4.0f}%  {_esc(n)}  —  {lo_l} {_money(lo)} → {hi_l} {_money(hi)}"
                 for n, lo_l, lo, hi_l, hi, p in rows]
         head = "<b>↔️ Топ розкид між ринками</b>"
     else:
         rows = market.top_cheapest(15)
         if not rows:
             return "<b>Топ · найдешевші</b>\n\nЩе нема даних.", keyboards.top_kb(mode)
-        body = [f"${p:>6.2f}  {_esc(n)}  ({lbl})" for n, lbl, p in rows]
+        names = [r[0] for r in rows]
+        body = [f"{_money(p):>8}  {_esc(n)}  ({lbl})" for n, lbl, p in rows]
         head = "<b>💸 Найдешевші зараз</b>"
-    return head + "\n<pre>" + _esc("\n".join(body)) + "</pre>", keyboards.top_kb(mode)
+    _last_top[uid] = names
+    return (head + "\n<pre>" + _esc("\n".join(body)) + "</pre>",
+            keyboards.top_kb(mode, names))
 
 
 def _open_links(name: str, market):
@@ -302,10 +313,56 @@ def _open_links(name: str, market):
 
 def _mkt_row(lbl: str, q, first: bool) -> str:
     mark = "▸ " if first else "  "
-    line = f"{mark}{lbl:<12}{'$' + format(q.price, '.2f'):>8}"
+    line = f"{mark}{lbl:<12}{_money(q.price):>10}"
     if q.buy_order:
-        line += f"   скуп ${q.buy_order:.2f}"
+        line += f"   скуп {_money(q.buy_order)}"
     return line
+
+
+def _target_suggestions(price: float, direction: str):
+    """3 підказані цілі навколо поточної ціни."""
+    if direction == "up":
+        raw = [price, price * 1.05, price * 1.10]
+    else:
+        raw = [price, price * 0.95, price * 0.90]
+    seen, out = set(), []
+    for p in raw:
+        r = round(p, 2)
+        if r > 0 and r not in seen:
+            seen.add(r)
+            out.append(r)
+    return out
+
+
+async def _ask_price(cb, name: str, market, edit_wid=None, direction="down"):
+    best = market.best(name)
+    txt = (f"«{_esc(name)}»\nНадішли ціль у $ — напр. <code>0.13</code>\n"
+           "(або <code>0.13 x200</code> опт, <code>0.20 вгору</code> на зростання)")
+    kb = None
+    if best is not None:
+        kb = keyboards.target_kb(_target_suggestions(best[2].price, direction), edit_wid)
+        txt += f"\n\nАбо тапни підказку (зараз ${best[2].price:.2f}):"
+    await cb.message.answer(txt, reply_markup=kb)
+    await cb.answer()
+
+
+async def _steam_followup(cb, name, market, render):
+    """Дотягнути ціну Steam і перемалювати екран, коли зʼявиться."""
+    try:
+        if not (market.steam and market.steam.enabled):
+            return
+        if market.steam.cached(name) is not None:
+            return
+        got = await market.steam.get(name)
+        if got is None:
+            return
+        text, kb = await render()
+        try:
+            await cb.message.edit_text(text, reply_markup=kb)
+        except Exception:
+            pass
+    except Exception:
+        pass
 
 
 async def _warm_steam(market, name):
@@ -419,7 +476,10 @@ async def _compare_view(name: str, market):
         return f"<b>{_esc(name)}</b>\n\nЦіни ніде не знайшов.", keyboards.back_kb()
     rows = []
     for i, (_, lbl, q) in enumerate(qs):
-        line = _mkt_row(lbl, q, i == 0)
+        mark = "▸ " if i == 0 else "  "
+        line = f"{mark}{lbl:<12}{_money(q.price):>10}"
+        if q.buy_order:
+            line += f"   скуп {_money(q.buy_order)}"
         if q.qty:
             line += f"   {_n(q.qty)} шт"
         rows.append(line)
@@ -444,7 +504,9 @@ async def _add_watch(uid: int, chat_id: int, raw_name: str, price: float,
                 if s > matcher.MIN_SUGGEST]
         _last_search[uid] = sugg
         if sugg:
-            return (f"«{_esc(raw_name)}» — не впевнений. Вибери:", keyboards.find_kb(sugg))
+            items = [(n, market.best(n)[2].price if market.best(n) else None)
+                     for n in sugg]
+            return (f"«{_esc(raw_name)}» — не впевнений. Вибери:", keyboards.find_kb(items))
         return (f"Не знайшов «{_esc(raw_name)}». Напиши інакше.", keyboards.menu_kb())
 
     wid, action = await db.add_watch(uid, chat_id, canonical, price,
@@ -562,7 +624,7 @@ async def cmd_status(message: Message, client, depth, market):
 
 @router.message(Command("top"))
 async def cmd_top(message: Message, market):
-    text, kb = await _top_view(market, "cheap")
+    text, kb = await _top_view(message.from_user.id, market, "cheap")
     await message.answer(text, reply_markup=kb)
 
 
@@ -606,13 +668,13 @@ async def cmd_watch(message: Message, command: CommandObject, client, depth, mar
 
 
 @router.message(Command("find"))
-async def cmd_find(message: Message, command: CommandObject, client):
+async def cmd_find(message: Message, command: CommandObject, client, market):
     q = (command.args or "").strip()
     if not q:
         await message.answer("Напиши назву або частину після /find.",
                              reply_markup=keyboards.menu_kb())
         return
-    await _do_search(message, q, client)
+    await _do_search(message, q, client, market)
 
 
 @router.message(Command("unwatch"))
@@ -681,7 +743,7 @@ async def kb_help(message: Message):
 
 # ---------- вільний текст ----------
 
-async def _do_search(message: Message, q: str, client):
+async def _do_search(message: Message, q: str, client, market):
     if not client.ready():
         await message.answer("Каталог ще вантажиться.")
         return
@@ -691,7 +753,8 @@ async def _do_search(message: Message, q: str, client):
         await message.answer("Нічого не знайшов.", reply_markup=keyboards.menu_kb())
         return
     _last_search[message.from_user.id] = hits
-    await message.answer("Вибери скін:", reply_markup=keyboards.find_kb(hits))
+    items = [(n, market.best(n)[2].price if market.best(n) else None) for n in hits]
+    await message.answer("Вибери скін:", reply_markup=keyboards.find_kb(items))
 
 
 @router.message(F.text & ~F.text.startswith("/"))
@@ -749,7 +812,7 @@ async def on_text(message: Message, client, depth, market):
         await message.answer(text, reply_markup=kb)
         return
 
-    await _do_search(message, txt, client)
+    await _do_search(message, txt, client, market)
 
 
 # ---------- інлайн-кнопки ----------
@@ -777,7 +840,7 @@ async def on_callback(cb: CallbackQuery, client, depth, market):
         mode = sid.split(":")[0]
         if mode not in ("cheap", "spread"):
             mode = "cheap"
-        await _show(cb, *await _top_view(market, mode))
+        await _show(cb, *await _top_view(uid, market, mode))
         return
     if action == "lst":
         try:
@@ -830,10 +893,7 @@ async def on_callback(cb: CallbackQuery, client, depth, market):
             await cb.answer("застаріло, повтори пошук")
             return
         _pending_price[uid] = name
-        await cb.message.answer(
-            f"«{_esc(name)}»\nТепер напиши ціль у $ — напр. <code>0.13</code>\n"
-            "(або <code>0.13 x200</code> опт, <code>0.20 вгору</code> на зростання)")
-        await cb.answer()
+        await _ask_price(cb, name, market)
         return
     if action == "qa":
         try:
@@ -847,9 +907,35 @@ async def on_callback(cb: CallbackQuery, client, depth, market):
             await cb.answer()
             return
         _pending_price[uid] = canonical
-        await cb.message.answer(
-            f"«{_esc(canonical)}»\nТепер напиши ціль у $ — напр. <code>0.13</code>\n"
-            "(або <code>0.13 x200</code> опт, <code>0.20 вгору</code> на зростання)")
+        await _ask_price(cb, canonical, market)
+        return
+    if action == "tp":
+        try:
+            name = _last_top.get(uid, [])[int(sid)]
+        except (ValueError, IndexError):
+            await cb.answer("застаріло")
+            return
+        canonical, _ = matcher.resolve(name, client.names)
+        if canonical is None:
+            await cb.message.answer(f"«{_esc(name)}» нема в каталозі lis-skins.")
+            await cb.answer()
+            return
+        _pending_price[uid] = canonical
+        await _ask_price(cb, canonical, market)
+        return
+    if action == "pp":
+        name = _pending_price.pop(uid, None)
+        if not name:
+            await cb.answer("застаріло")
+            return
+        try:
+            price = float(sid)
+        except ValueError:
+            await cb.answer()
+            return
+        text, kb = await _add_watch(uid, cb.message.chat.id, name, price, 1,
+                                    "down", client, depth, market)
+        await cb.message.answer(text, reply_markup=kb)
         await cb.answer()
         return
 
@@ -876,6 +962,19 @@ async def on_callback(cb: CallbackQuery, client, depth, market):
             pass
         await cb.answer("ок")
         return
+    if action == "edp":
+        try:
+            wid, price = int(sid.split(":")[0]), float(sid.split(":")[1])
+        except (ValueError, IndexError):
+            await cb.answer()
+            return
+        _pending_edit.pop(uid, None)
+        w = await db.get_watch(uid, wid)
+        dr = w["direction"] if w else "down"
+        ok = await db.set_target(uid, wid, price, 1, dr)
+        await _show(cb, *await _watch_card(uid, wid, market),
+                    toast="ціль оновлено" if ok else "нема такого")
+        return
 
     try:
         wid = int(sid)
@@ -884,7 +983,11 @@ async def on_callback(cb: CallbackQuery, client, depth, market):
         return
 
     if action == "w":
+        w = await db.get_watch(uid, wid)
         await _show(cb, *await _watch_card(uid, wid, market))
+        if w is not None:
+            asyncio.create_task(_steam_followup(
+                cb, w["skin_name"], market, lambda: _watch_card(uid, wid, market)))
         return
     if action == "dep":
         await _show(cb, *await _depth_view(uid, wid, client, depth, market))
@@ -894,7 +997,10 @@ async def on_callback(cb: CallbackQuery, client, depth, market):
         if w is None:
             await cb.answer("нема такого")
             return
-        await _show(cb, *await _compare_view(w["skin_name"], market))
+        nm = w["skin_name"]
+        await _show(cb, *await _compare_view(nm, market))
+        asyncio.create_task(_steam_followup(
+            cb, nm, market, lambda: _compare_view(nm, market)))
         return
     if action == "ed":
         w = await db.get_watch(uid, wid)
@@ -902,11 +1008,8 @@ async def on_callback(cb: CallbackQuery, client, depth, market):
             await cb.answer("нема такого")
             return
         _pending_edit[uid] = wid
-        await cb.message.answer(
-            f"<b>#{wid} · {_esc(w['skin_name'])}</b>\n"
-            "Надішли нову ціль у $ — напр. <code>0.13</code>\n"
-            "(або <code>0.13 x200</code>, <code>0.20 вгору</code>)")
-        await cb.answer()
+        await _ask_price(cb, w["skin_name"], market, edit_wid=wid,
+                        direction=w["direction"])
         return
     if action == "del":
         w = await db.get_watch(uid, wid)

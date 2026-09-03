@@ -112,14 +112,32 @@ def snooze_kb(wid: int) -> InlineKeyboardMarkup:
     ])
 
 
-def top_kb(mode: str) -> InlineKeyboardMarkup:
+def top_kb(mode: str, names=None) -> InlineKeyboardMarkup:
+    kb, row = [], []
+    for i, n in enumerate((names or [])[:6]):
+        row.append(InlineKeyboardButton(
+            text="⚡ " + n.replace(" Case", "").replace(" Capsule", "")[:18],
+            callback_data=f"tp:{i}"))
+        if len(row) == 2:
+            kb.append(row)
+            row = []
+    if row:
+        kb.append(row)
     other = "spread" if mode == "cheap" else "cheap"
     lbl = "↔️ розкид ринків" if other == "spread" else "💸 найдешевші"
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=lbl, callback_data=f"top:{other}:0"),
-         InlineKeyboardButton(text="🔄", callback_data=f"top:{mode}:0")],
-        [_LIST, _HOME],
-    ])
+    kb.append([InlineKeyboardButton(text=lbl, callback_data=f"top:{other}:0"),
+               InlineKeyboardButton(text="🔄", callback_data=f"top:{mode}:0")])
+    kb.append([_LIST, _HOME])
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def target_kb(prices, edit_wid: int | None = None):
+    """3 підказані цілі + рядок навігації. edit_wid → edp:, інакше pp:."""
+    pfx = f"edp:{edit_wid}:" if edit_wid is not None else "pp:"
+    kb = [[InlineKeyboardButton(text=f"🎯 ${p:.2f}", callback_data=f"{pfx}{p:.2f}")
+           for p in prices]]
+    kb.append([_HOME])
+    return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
 def watch_kb(wid: int, muted: bool, open_links=None) -> InlineKeyboardMarkup:
@@ -160,9 +178,16 @@ def after_add_kb(wid: int) -> InlineKeyboardMarkup:
     ])
 
 
-def find_kb(names) -> InlineKeyboardMarkup:
-    kb = [[InlineKeyboardButton(text=n[:60], callback_data=f"pk:{i}")]
-          for i, n in enumerate(names[:10])]
+def find_kb(items) -> InlineKeyboardMarkup:
+    """items: список назв або (назва, ціна|None)."""
+    kb = []
+    for i, it in enumerate(items[:10]):
+        if isinstance(it, tuple):
+            n, p = it
+            txt = f"{n[:44]}  ${p:.2f}" if p else n[:60]
+        else:
+            txt = it[:60]
+        kb.append([InlineKeyboardButton(text=txt, callback_data=f"pk:{i}")])
     kb.append([InlineKeyboardButton(text="➕ Додати вручну", callback_data="add"), _HOME])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 

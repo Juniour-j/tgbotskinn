@@ -57,6 +57,25 @@ def is_muted(row) -> bool:
     return False
 
 
+def muted_label(row) -> str:
+    """'' | '🔕 назавжди' | '🔕 ще 45 хв' | '🔕 ще 6 год'."""
+    if row["muted"]:
+        return "🔕 назавжди"
+    mu = row["muted_until"]
+    if not mu:
+        return ""
+    try:
+        dt = datetime.fromisoformat(mu)
+    except ValueError:
+        return ""
+    mins = (dt - _now_dt()).total_seconds() / 60
+    if mins <= 0:
+        return ""
+    if mins > 90:
+        return f"🔕 ще {int(mins / 60)} год"
+    return f"🔕 ще {int(mins)} хв"
+
+
 async def init_db(path: str):
     global _db
     _db = await aiosqlite.connect(path)
