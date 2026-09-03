@@ -22,6 +22,8 @@ class Quote:
     price: float
     qty: int
     url: str
+    buy_order: float = 0.0   # скільки скуповують (bid), якщо ринок віддає
+    name: str = ""           # market_hash_name як віддав ринок
 
 
 class _JsonSource:
@@ -41,8 +43,14 @@ class _JsonSource:
         )
         self._by_norm: dict[str, Quote] = {}
         self._last = 0.0
+        self._ok_at = 0.0            # час останнього успішного оновлення
         self._etag: str | None = None
         self._fails = 0  # підряд невдалих спроб -> експоненційний бекоф
+
+    def status(self) -> dict:
+        age = int(time.time() - self._ok_at) if self._ok_at else -1
+        return {"key": self.key, "items": len(self._by_norm),
+                "age_s": age, "fails": self._fails}
 
     def _cur_interval(self) -> float:
         # після кількох помилок відкладаємо запити (до ~1 год), щоб не спамити
@@ -79,7 +87,7 @@ class _JsonSource:
             self._by_norm = data
             self._etag = r.headers.get("ETag") or self._etag
         self._fails = 0
-        self._last = time.time()
+        self._last = self._ok_at = time.time()
         log.info("%s updated: %d items", self.key, len(self._by_norm))
         return True
 
@@ -88,6 +96,9 @@ class _JsonSource:
 
     def lookup(self, lis_name: str) -> Quote | None:
         return self._by_norm.get(normalize(lis_name))
+
+    def items(self):
+        return self._by_norm.items()
 
     def ready(self) -> bool:
         return bool(self._by_norm)
@@ -99,11 +110,14 @@ class _JsonSource:
 class McsgoSource(_JsonSource):
     key = "mcsgo"
     label = "market.csgo"
-    min_interval = 60
+    min_interval = 90  # class_instance-фід ~7 МБ
 
     def _parse(self, payload) -> dict:
-        out: dict[str, Quote] = {}
-        for it in payload.get("items", []):
+        # items — словник classid_instanceid -> {price, buy_order, market_hash_name, ...}
+        items = payload.get("items", {})
+        rows = items.values() if isinstance(items, dict) else items
+        by_name: dict[str, tuple] = {}  # norm -> (price, buy_order, raw_name)
+        for it in rows:
             n = it.get("market_hash_name")
             if not n:
                 continue
@@ -114,12 +128,17 @@ class McsgoSource(_JsonSource):
             if price <= 0:
                 continue
             try:
-                vol = int(float(it.get("volume") or 0))
+                bo = float(it.get("buy_order") or 0)
             except (TypeError, ValueError):
-                vol = 0
-            out[normalize(n)] = Quote(price, vol,
-                                      f"https://market.csgo.com/en/{quote(n)}")
-        return out
+                bo = 0.0
+            k = normalize(n)
+            cur = by_name.get(k)
+            if cur is None or price < cur[0]:
+                by_name[k] = (price, bo, n)
+        return {
+            k: Quote(price, 0, f"https://market.csgo.com/en/{quote(rn)}", bo, rn)
+            for k, (price, bo, rn) in by_name.items()
+        }
 
 
 class SkinportSource(_JsonSource):
@@ -145,6 +164,7 @@ class SkinportSource(_JsonSource):
                 price,
                 int(it.get("quantity") or 0),
                 it.get("item_page") or "https://skinport.com",
+                0.0, n,
             )
         return out
 

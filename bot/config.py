@@ -10,7 +10,7 @@ load_dotenv()
 
 DEFAULT_EXPORT_URL = "https://lis-skins.com/market_export_json/csgo.json"
 DEFAULT_FULL_EXPORT_URL = "https://lis-skins.com/market_export_json/api_csgo_full.json"
-DEFAULT_MCSGO_URL = "https://market.csgo.com/api/v2/prices/USD.json"
+DEFAULT_MCSGO_URL = "https://market.csgo.com/api/v2/prices/class_instance/USD.json"
 DEFAULT_SKINPORT_URL = "https://api.skinport.com/v1/items?app_id=730&currency=USD"
 
 
@@ -42,6 +42,7 @@ class Config:
     sources: tuple = ("mcsgo", "skinport")
     mcsgo_url: str = DEFAULT_MCSGO_URL
     skinport_url: str = DEFAULT_SKINPORT_URL
+    steam_enabled: bool = True
 
     @classmethod
     def load(cls) -> "Config":
@@ -60,4 +61,5 @@ class Config:
             sources=_parse_sources(os.environ.get("SOURCES", "mcsgo,skinport")),
             mcsgo_url=os.environ.get("MCSGO_URL", DEFAULT_MCSGO_URL),
             skinport_url=os.environ.get("SKINPORT_URL", DEFAULT_SKINPORT_URL),
+            steam_enabled=os.environ.get("STEAM_ENABLED", "1") not in ("0", "false", ""),
         )

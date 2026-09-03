@@ -34,12 +34,17 @@ QUICK_ADD = (
 )
 
 
+PAGE = 8  # стежень на сторінку списку
+
+
 def menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📋 Мої стеження", callback_data="lst:0")],
         [InlineKeyboardButton(text="➕ Додати стеження", callback_data="add")],
         [InlineKeyboardButton(text="🔀 Порівняти ціни", callback_data="cmpask"),
-         InlineKeyboardButton(text="🔎 Знайти скін", callback_data="find")],
+         InlineKeyboardButton(text="💸 Топ", callback_data="top:cheap:0")],
+        [InlineKeyboardButton(text="🔎 Знайти скін", callback_data="find"),
+         InlineKeyboardButton(text="📈 Статус", callback_data="status")],
         [InlineKeyboardButton(text="❓ Довідка", callback_data="help")],
     ])
 
@@ -58,21 +63,60 @@ def add_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
-def list_kb(rows) -> InlineKeyboardMarkup:
-    """Компактно: 2 кнопки на стеження (глибина + керувати)."""
+_SORTS = ("state", "price", "name")
+_SORT_LBL = {"state": "за станом", "price": "за ціною", "name": "за назвою"}
+
+
+def list_kb(page_rows, page: int, pages: int, sort: str,
+            has_triggered: bool) -> InlineKeyboardMarkup:
     kb = []
-    for r in rows[:20]:
+    for r in page_rows:
         wid = r["id"]
         kb.append([
-            InlineKeyboardButton(text=f"📊 Глибина #{wid}", callback_data=f"dep:{wid}"),
+            InlineKeyboardButton(text=f"📊 #{wid}", callback_data=f"dep:{wid}"),
             InlineKeyboardButton(text=f"⚙️ Керувати #{wid}", callback_data=f"w:{wid}"),
         ])
+    if pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(text="◀", callback_data=f"lst:{page-1}"))
+        nav.append(InlineKeyboardButton(text=f"{page+1}/{pages}", callback_data=f"lst:{page}"))
+        if page < pages - 1:
+            nav.append(InlineKeyboardButton(text="▶", callback_data=f"lst:{page+1}"))
+        kb.append(nav)
+    nxt = _SORTS[(_SORTS.index(sort) + 1) % len(_SORTS)]
     kb.append([
-        InlineKeyboardButton(text="➕ Додати", callback_data="add"),
-        InlineKeyboardButton(text="🔄 Оновити", callback_data="lst:0"),
+        InlineKeyboardButton(text=f"⇅ {_SORT_LBL[sort]}", callback_data=f"srt:{nxt}"),
+        InlineKeyboardButton(text="🔄 Оновити", callback_data=f"lst:{page}"),
     ])
-    kb.append([_HOME])
+    bulk = [InlineKeyboardButton(text="🔕 стишити всі", callback_data="allmut")]
+    if has_triggered:
+        bulk.append(InlineKeyboardButton(text="🧹 прибрати спрацьовані",
+                                         callback_data="clrdone"))
+    kb.append(bulk)
+    kb.append([InlineKeyboardButton(text="➕ Додати", callback_data="add"), _HOME])
     return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def snooze_kb(wid: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔕 1 год", callback_data=f"snz:{wid}:60"),
+         InlineKeyboardButton(text="🔕 8 год", callback_data=f"snz:{wid}:480"),
+         InlineKeyboardButton(text="🔕 24 год", callback_data=f"snz:{wid}:1440")],
+        [InlineKeyboardButton(text="🔕 назавжди", callback_data=f"mut:{wid}"),
+         InlineKeyboardButton(text="🔔 увімкнути", callback_data=f"unm:{wid}")],
+        [InlineKeyboardButton(text="⬅️ до картки", callback_data=f"w:{wid}"), _HOME],
+    ])
+
+
+def top_kb(mode: str) -> InlineKeyboardMarkup:
+    other = "spread" if mode == "cheap" else "cheap"
+    lbl = "↔️ розкид ринків" if other == "spread" else "💸 найдешевші"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=lbl, callback_data=f"top:{other}:0"),
+         InlineKeyboardButton(text="🔄", callback_data=f"top:{mode}:0")],
+        [_LIST, _HOME],
+    ])
 
 
 def watch_kb(wid: int, muted: bool, open_links=None) -> InlineKeyboardMarkup:
@@ -84,8 +128,7 @@ def watch_kb(wid: int, muted: bool, open_links=None) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="📊 Глибина", callback_data=f"dep:{wid}"),
         InlineKeyboardButton(text="🔀 Порівняти", callback_data=f"cmp:{wid}"),
     ])
-    mute = (("🔔 Увімкнути звук", f"unm:{wid}") if muted
-            else ("🔕 Без звуку", f"mut:{wid}"))
+    mute = ("🔔 Звук", f"unm:{wid}") if muted else ("🔕 Тиша…", f"snz:{wid}")
     kb.append([
         InlineKeyboardButton(text="✏️ Змінити ціль", callback_data=f"ed:{wid}"),
         InlineKeyboardButton(text=mute[0], callback_data=mute[1]),

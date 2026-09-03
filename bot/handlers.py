@@ -5,12 +5,13 @@ import asyncio
 import html
 import logging
 import re
+import time
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, Message
 
-from . import db, keyboards, matcher
+from . import alerts, db, keyboards, matcher
 
 log = logging.getLogger("handlers")
 router = Router()
@@ -27,9 +28,12 @@ HELP = (
     "<b>За обсягом</b> — додай <code>x&lt;кількість&gt;</code>:\n"
     "<blockquote><code>Kilowatt Case 0.13 x200</code></blockquote>"
     "→ сповіщу, коли на lis-skins можна <b>купити</b> 200+ шт по ≤ $0.13.\n\n"
+    "<b>На зростання</b> (для продажу) — додай <code>вгору</code>:\n"
+    "<blockquote><code>Kilowatt Case 0.20 вгору</code></blockquote>\n"
     "Не знаєш назву — напиши частину («kilowatt»), покажу варіанти.\n\n"
     "У списку: <b>📊 Глибина</b> і <b>⚙️ Керувати</b> "
-    "(🔗 відкрити · ✏️ змінити ціль · 🔀 порівняти · 🔕 звук · 🗑 видалити)."
+    "(🔗 відкрити · ✏️ змінити ціль · 🔀 порівняти · 🔕 тиша · 🗑 видалити).\n"
+    "Ще: <b>💸 Топ</b>, <b>📈 Статус</b>, <code>/compare назва</code>."
 )
 
 _ADD_PROMPT = (
@@ -43,46 +47,78 @@ _ADD_PROMPT = (
 )
 
 _QTY_RE = re.compile(r"^[xхXХ*](\d+)$")
+_UP_WORDS = ("вгору", "up", "↑", "вище", ">")
+_DOWN_WORDS = ("вниз", "down", "↓", "нижче", "<")
+
+_STARTED = time.time()
 
 # короткочасний стан у памʼяті (втрачається при рестарті — не критично)
 _pending_price: dict[int, str] = {}     # user_id -> canonical name, чекаємо ціну
 _pending_edit: dict[int, int] = {}      # user_id -> watch_id, чекаємо нову ціль
 _pending_compare: set[int] = set()      # user_id -> чекаємо назву для /compare
 _last_search: dict[int, list] = {}      # user_id -> список знайдених назв
+_sort_mode: dict[int, str] = {}         # user_id -> "state"|"price"|"name"
 
 
 # ---------- парсери ----------
 
+def _split_price(tok: str):
+    """('0.13', 'up'|'down'|None) — визначає напрямок за префіксом >/<."""
+    t = tok.strip().lstrip("$")
+    if t[:1] == ">":
+        return t[1:], "up"
+    if t[:1] == "<":
+        return t[1:], "down"
+    return t, None
+
+
 def _parse_watch_args(args: str):
     toks = args.split()
+    if len(toks) < 2:
+        raise ValueError
+    direction = "down"
+    if toks[-1].lower() in _UP_WORDS:
+        direction, toks = "up", toks[:-1]
+    elif toks[-1].lower() in _DOWN_WORDS:
+        toks = toks[:-1]
     if len(toks) < 2:
         raise ValueError
     qty = 1
     m = _QTY_RE.match(toks[-1])
     if m and len(toks) >= 3:
         qty = int(m.group(1))
-        toks.pop()
-    price = float(toks[-1].strip().lstrip("$").replace(",", "."))
-    toks.pop()
-    name = " ".join(toks).strip()
+        toks = toks[:-1]
+    ptok, pdir = _split_price(toks[-1])
+    if pdir:
+        direction = pdir
+    price = float(ptok.replace(",", "."))
+    name = " ".join(toks[:-1]).strip()
     if not name or price <= 0 or qty < 1:
         raise ValueError
-    return name, price, qty
+    return name, price, qty, direction
 
 
 def _parse_price_qty(s: str):
     toks = s.split()
+    direction = "down"
+    if toks and toks[-1].lower() in _UP_WORDS:
+        direction, toks = "up", toks[:-1]
+    elif toks and toks[-1].lower() in _DOWN_WORDS:
+        toks = toks[:-1]
     qty = 1
     m = _QTY_RE.match(toks[-1]) if toks else None
     if m and len(toks) >= 2:
         qty = int(m.group(1))
-        toks.pop()
+        toks = toks[:-1]
     if len(toks) != 1:
         raise ValueError
-    price = float(toks[0].strip().lstrip("$").replace(",", "."))
+    ptok, pdir = _split_price(toks[0])
+    if pdir:
+        direction = pdir
+    price = float(ptok.replace(",", "."))
     if price <= 0 or qty < 1:
         raise ValueError
-    return price, qty
+    return price, qty, direction
 
 
 # ---------- спільні екрани ----------
@@ -118,7 +154,7 @@ def _mkt_line(name: str, market, short: bool = False) -> str:
 
 
 def _state(row, met: bool) -> str:
-    if row["muted"]:
+    if db.is_muted(row):
         return "🔕 без звуку"
     if met:
         return "✅ ціль досягнута" + (" · сповіщено" if row["triggered"] else "")
@@ -126,53 +162,108 @@ def _state(row, met: bool) -> str:
 
 
 def _icon(row, met: bool) -> str:
-    return "🔕" if row["muted"] else ("✅" if met else "⏳")
+    return "🔕" if db.is_muted(row) else ("✅" if met else "⏳")
 
 
-async def _list_view(user_id: int, market):
+def _sign(row) -> str:
+    return "≥" if row["direction"] == "up" else "≤"
+
+
+async def _list_view(user_id: int, market, page: int = 0):
     rows = await db.list_watches(user_id)
     if not rows:
         return ("<b>Ще нема жодного стеження.</b>\n\n"
                 "Тисни ➕ Додати або просто напиши назву й ціль:\n"
                 "<blockquote><code>Kilowatt Case 0.13</code></blockquote>"), keyboards.add_kb()
     depth = market.depth
-    items = []  # (sortkey, block, met_active)
+    sort = _sort_mode.get(user_id, "state")
+    entries = []  # (row, block, met, cheapest_price)
     for r in rows:
         name = _esc(r["skin_name"])
-        t = r["target_price"]
+        t, sg = r["target_price"], _sign(r)
         mkt = _mkt_line(r["skin_name"], market, short=True) or "ціни ще нема"
+        best = market.best(r["skin_name"])
+        cheap = best[2].price if best else 1e12
         if r["min_qty"] > 1:
             have = depth.buyable_qty(r["skin_name"], t)
             met = have is not None and have >= r["min_qty"]
             fp = depth.fill_price(r["skin_name"], r["min_qty"])
             now = f"{_n(have)} шт" if have is not None else "…"
             fill = f" · набрати {r['min_qty']} від <b>${fp:.2f}</b>" if fp else ""
-            block = (
-                f"<blockquote>{_icon(r, met)} <b>#{r['id']} {name}</b>  · опт ≥{r['min_qty']}\n"
-                f"ціль ≤ ${t:.2f}  ·  зараз {now}{fill}\n"
-                f"<i>{mkt}</i></blockquote>"
-            )
+            block = (f"<blockquote>{_icon(r, met)} <b>#{r['id']} {name}</b>  · опт ≥{r['min_qty']}\n"
+                     f"ціль ≤ ${t:.2f}  ·  зараз {now}{fill}\n<i>{mkt}</i></blockquote>")
         else:
-            best = market.best(r["skin_name"])
-            met = best is not None and best[2].price <= t
+            met = best is not None and alerts.hit(t, best[2].price, r["direction"])
             if best is not None:
                 gap = best[2].price - t
-                tail = "нижче цілі" if gap <= 0 else f"ще −${gap:.2f}"
+                if r["direction"] == "up":
+                    tail = "вище цілі" if gap >= 0 else f"ще +${-gap:.2f}"
+                else:
+                    tail = "нижче цілі" if gap <= 0 else f"ще −${gap:.2f}"
                 now = f"<b>${best[2].price:.2f}</b> {_SHORT.get(best[1], best[1])} · {tail}"
             else:
                 now = "?"
-            block = (
-                f"<blockquote>{_icon(r, met)} <b>#{r['id']} {name}</b>\n"
-                f"ціль ≤ ${t:.2f}  ·  зараз {now}\n"
-                f"<i>{mkt}</i></blockquote>"
-            )
-        active = met and not r["muted"]
-        key = (1 if r["muted"] else 0, 0 if active else 1, r["id"])
-        items.append((key, block, active))
-    items.sort(key=lambda x: x[0])
-    done = sum(1 for _, _, a in items if a)
-    hdr = f"<b>Стеження</b> · {len(rows)}" + (f"   ✅ {done}" if done else "")
-    return hdr + "\n" + "\n".join(b for _, b, _ in items), keyboards.list_kb(rows)
+            block = (f"<blockquote>{_icon(r, met)} <b>#{r['id']} {name}</b>\n"
+                     f"ціль {sg} ${t:.2f}  ·  зараз {now}\n<i>{mkt}</i></blockquote>")
+        entries.append((r, block, met and not db.is_muted(r), cheap))
+
+    if sort == "price":
+        entries.sort(key=lambda e: e[3])
+    elif sort == "name":
+        entries.sort(key=lambda e: e[0]["skin_name"].lower())
+    else:  # state
+        entries.sort(key=lambda e: (1 if db.is_muted(e[0]) else 0,
+                                    0 if e[2] else 1, e[0]["id"]))
+
+    pages = (len(entries) + keyboards.PAGE - 1) // keyboards.PAGE
+    page = max(0, min(page, pages - 1))
+    chunk = entries[page * keyboards.PAGE:(page + 1) * keyboards.PAGE]
+    done = sum(1 for _, _, a, _ in entries if a)
+    has_trig = any(e[0]["triggered"] for e in entries)
+    hdr = f"<b>Стеження</b> · {len(entries)}" + (f"   ✅ {done}" if done else "")
+    body = "\n".join(b for _, b, _, _ in chunk)
+    kb = keyboards.list_kb([e[0] for e in chunk], page, pages, sort, has_trig)
+    return hdr + "\n" + body, kb
+
+
+async def _status_view(market, client, depth):
+    up = int(time.time() - _STARTED)
+    d, rem = divmod(up, 86400)
+    h, rem = divmod(rem, 3600)
+    m = rem // 60
+    upt = (f"{d}д " if d else "") + f"{h}г {m}хв"
+    n_w = await db.count_watches()
+    lines = [
+        "<b>📈 Статус</b>",
+        f"аптайм: {upt}",
+        f"стежень: {n_w}",
+        f"каталог lis: {len(client.names)} назв",
+        f"глибина lis: {'—' if depth.age_min() < 0 else f'{depth.age_min()} хв тому'}",
+    ]
+    for s in market.sources:
+        st = s.status()
+        age = "—" if st["age_s"] < 0 else f"{st['age_s'] // 60} хв тому"
+        warn = f"  ⚠️ помилок: {st['fails']}" if st["fails"] else ""
+        lines.append(f"{s.label}: {st['items']} поз · {age}{warn}")
+    lines.append(f"Steam: {'увімкнено' if market.steam and market.steam.enabled else 'вимкнено'}")
+    return "\n".join(lines), keyboards.back_kb()
+
+
+async def _top_view(market, mode: str):
+    if mode == "spread":
+        rows = market.top_spread(15)
+        if not rows:
+            return "<b>Топ · розкид</b>\n\nНедостатньо даних (треба 2+ ринки).", keyboards.top_kb(mode)
+        body = [f"{p:>4.0f}%  {_esc(n)}  —  {lo_l} ${lo:.2f} → {hi_l} ${hi:.2f}"
+                for n, lo_l, lo, hi_l, hi, p in rows]
+        head = "<b>↔️ Топ розкид між ринками</b>"
+    else:
+        rows = market.top_cheapest(15)
+        if not rows:
+            return "<b>Топ · найдешевші</b>\n\nЩе нема даних.", keyboards.top_kb(mode)
+        body = [f"${p:>6.2f}  {_esc(n)}  ({lbl})" for n, lbl, p in rows]
+        head = "<b>💸 Найдешевші зараз</b>"
+    return head + "\n<pre>" + _esc("\n".join(body)) + "</pre>", keyboards.top_kb(mode)
 
 
 def _open_links(name: str, market):
@@ -181,6 +272,25 @@ def _open_links(name: str, market):
         if q.url:
             out.append((lbl, q.url))
     return out
+
+
+def _mkt_row(lbl: str, q, first: bool) -> str:
+    mark = "▸ " if first else "  "
+    line = f"{mark}{lbl:<12}{'$' + format(q.price, '.2f'):>8}"
+    if q.buy_order:
+        line += f"   скуп ${q.buy_order:.2f}"
+    return line
+
+
+async def _steam_note(name: str, best_price, market) -> str:
+    if not (market.steam and market.steam.enabled):
+        return ""
+    sp = await market.steam.get(name)
+    if not sp:
+        return ""
+    if best_price and sp > 0:
+        return f"Steam ${sp:.2f}  ·  найдешевше −{(sp - best_price) / sp * 100:.0f}%"
+    return f"Steam ${sp:.2f}"
 
 
 async def _watch_card(user_id: int, wid: int, market):
@@ -201,22 +311,27 @@ async def _watch_card(user_id: int, wid: int, market):
         if fp is not None:
             inner.append(f"<b>Набір</b>  {w['min_qty']} шт від <b>${fp:.2f}</b>")
     else:
-        met = best is not None and best[2].price <= t
-        inner.append(f"<b>Ціль</b>  ≤ <b>${t:.2f}</b>")
+        met = best is not None and alerts.hit(t, best[2].price, w["direction"])
+        inner.append(f"<b>Ціль</b>  {_sign(w)} <b>${t:.2f}</b>")
         inner.append(f"<b>Стан</b>  {_state(w, met)}")
         if best is not None:
             gap = best[2].price - t
-            note = "" if gap <= 0 else f"  ·  ще −${gap:.2f}"
+            if w["direction"] == "up":
+                note = "" if gap >= 0 else f"  ·  ще +${-gap:.2f}"
+            else:
+                note = "" if gap <= 0 else f"  ·  ще −${gap:.2f}"
             inner.append(f"<b>Зараз</b>  <b>${best[2].price:.2f}</b> — {best[1]}{note}")
     lines = [f"<b>#{wid} · {_esc(name)}</b>", "",
              "<blockquote>" + "\n".join(inner) + "</blockquote>"]
     qs = sorted(market.quotes(name), key=lambda x: x[2].price)
     if qs:
-        rows = [f"{'▸ ' if i == 0 else '  '}{lbl:<12}{'$' + format(q.price, '.2f'):>8}"
-                for i, (_, lbl, q) in enumerate(qs)]
+        rows = [_mkt_row(lbl, q, i == 0) for i, (_, lbl, q) in enumerate(qs)]
         lines.append("<pre>" + _esc("\n".join(rows)) + "</pre>")
+        sn = await _steam_note(name, qs[0][2].price, market)
+        if sn:
+            lines.append(sn)
     return ("\n".join(lines),
-            keyboards.watch_kb(wid, bool(w["muted"]), _open_links(name, market)))
+            keyboards.watch_kb(wid, db.is_muted(w), _open_links(name, market)))
 
 
 def _bar(q: int, mx: int, width: int = 10) -> str:
@@ -266,11 +381,17 @@ async def _compare_view(name: str, market):
     qs = sorted(market.quotes(name), key=lambda t: t[2].price)
     if not qs:
         return f"<b>{_esc(name)}</b>\n\nЦіни ніде не знайшов.", keyboards.back_kb()
-    rows = [f"{'▸ ' if i == 0 else '  '}{lbl:<12}{'$' + format(q.price, '.2f'):>8}"
-            + (f"   {_n(q.qty)} шт" if q.qty else "")
-            for i, (_, lbl, q) in enumerate(qs)]
+    rows = []
+    for i, (_, lbl, q) in enumerate(qs):
+        line = _mkt_row(lbl, q, i == 0)
+        if q.qty:
+            line += f"   {_n(q.qty)} шт"
+        rows.append(line)
     out = [f"<b>🔀 {_esc(name)}</b>",
            "<pre>" + _esc("\n".join(rows)) + "</pre>"]
+    sn = await _steam_note(name, qs[0][2].price, market)
+    if sn:
+        out.append(sn)
     if len(qs) > 1:
         lo, hi = qs[0][2].price, qs[-1][2].price
         pct = (hi - lo) / hi * 100 if hi else 0
@@ -280,7 +401,7 @@ async def _compare_view(name: str, market):
 
 
 async def _add_watch(uid: int, chat_id: int, raw_name: str, price: float,
-                     qty: int, client, depth, market):
+                     qty: int, direction: str, client, depth, market):
     canonical, exact = matcher.resolve(raw_name, client.names)
     if canonical is None:
         sugg = [n for n, s in matcher.best_matches(raw_name, client.names, 8)
@@ -290,10 +411,12 @@ async def _add_watch(uid: int, chat_id: int, raw_name: str, price: float,
             return (f"«{_esc(raw_name)}» — не впевнений. Вибери:", keyboards.find_kb(sugg))
         return (f"Не знайшов «{_esc(raw_name)}». Напиши інакше.", keyboards.menu_kb())
 
-    wid, action = await db.add_watch(uid, chat_id, canonical, price, min_qty=qty)
+    wid, action = await db.add_watch(uid, chat_id, canonical, price,
+                                    min_qty=qty, direction=direction)
     if wid is None:
         return "Не вдалося зберегти. Спробуй ще раз.", keyboards.menu_kb()
 
+    sg = "≥" if direction == "up" else "≤"
     head = "✅ <b>Стежу</b>" if action == "created" else "✏️ <b>Оновив стеження</b>"
     lines = [f"{head} #{wid}", f"<b>{_esc(canonical)}</b>"]
     if not exact:
@@ -315,14 +438,17 @@ async def _add_watch(uid: int, chat_id: int, raw_name: str, price: float,
             if fp is not None:
                 lines.append(f"Набрати {qty} шт зараз: від <b>${fp:.2f}</b>")
     else:
-        lines.append(f"Ціль: ціна ≤ <b>${price:.2f}</b>")
+        lines.append(f"Ціль: ціна {sg} <b>${price:.2f}</b>"
+                     + ("  (чекаю зростання)" if direction == "up" else ""))
         if best is not None:
             _, lbl, q = best
-            if q.price <= price:
-                lines.append(f"Зараз: <b>${q.price:.2f}</b> ({lbl}) — вже ≤ цілі ✅")
-                lines.append("<i>Сповіщу, якщо підніметься і знову впаде.</i>")
+            if alerts.hit(price, q.price, direction):
+                lines.append(f"Зараз: <b>${q.price:.2f}</b> ({lbl}) — вже {sg} цілі ✅")
+                lines.append("<i>Сповіщу, коли умова знову перестане й почне виконуватись.</i>")
             else:
-                lines.append(f"Зараз: <b>${q.price:.2f}</b> ({lbl}) — ще −${q.price - price:.2f} до цілі ⏳")
+                d = abs(q.price - price)
+                arrow = "+" if direction == "up" else "−"
+                lines.append(f"Зараз: <b>${q.price:.2f}</b> ({lbl}) — ще {arrow}${d:.2f} до цілі ⏳")
         else:
             lines.append("Ціна зʼявиться після наступного оновлення.")
             asyncio.create_task(_kick_depth(depth))
@@ -373,6 +499,18 @@ async def cmd_list(message: Message, market):
     await message.answer(text, reply_markup=kb)
 
 
+@router.message(Command("status"))
+async def cmd_status(message: Message, client, depth, market):
+    text, kb = await _status_view(market, client, depth)
+    await message.answer(text, reply_markup=kb)
+
+
+@router.message(Command("top"))
+async def cmd_top(message: Message, market):
+    text, kb = await _top_view(market, "cheap")
+    await message.answer(text, reply_markup=kb)
+
+
 @router.message(Command("depth"))
 async def cmd_depth(message: Message, command: CommandObject, client, depth, market):
     try:
@@ -403,12 +541,12 @@ async def cmd_watch(message: Message, command: CommandObject, client, depth, mar
         await message.answer(_ADD_PROMPT, reply_markup=keyboards.add_kb())
         return
     try:
-        name, price, qty = _parse_watch_args(command.args)
+        name, price, qty, direction = _parse_watch_args(command.args)
     except ValueError:
         await message.answer(_ADD_PROMPT, reply_markup=keyboards.add_kb())
         return
     text, kb = await _add_watch(message.from_user.id, message.chat.id,
-                                name, price, qty, client, depth, market)
+                                name, price, qty, direction, client, depth, market)
     await message.answer(text, reply_markup=kb)
 
 
@@ -520,12 +658,12 @@ async def on_text(message: Message, client, depth, market):
     if uid in _pending_edit:
         wid = _pending_edit.pop(uid)
         try:
-            price, qty = _parse_price_qty(txt)
+            price, qty, direction = _parse_price_qty(txt)
         except ValueError:
             _pending_edit[uid] = wid
-            await message.answer("Треба число, напр. 0.13 або 0.13 x200")
+            await message.answer("Треба число, напр. 0.13 (або 0.13 x200, або 0.20 вгору)")
             return
-        ok = await db.set_target(uid, wid, price, qty)
+        ok = await db.set_target(uid, wid, price, qty, direction)
         if not ok:
             await message.answer(f"Немає стеження #{wid}.")
             return
@@ -536,23 +674,23 @@ async def on_text(message: Message, client, depth, market):
     if uid in _pending_price:
         name = _pending_price.pop(uid)
         try:
-            price, qty = _parse_price_qty(txt)
+            price, qty, direction = _parse_price_qty(txt)
         except ValueError:
             _pending_price[uid] = name
-            await message.answer("Треба число, напр. 55 або 0.44 x200")
+            await message.answer("Треба число, напр. 55 (або 0.44 x200, або 0.60 вгору)")
             return
         text, kb = await _add_watch(uid, message.chat.id, name, price, qty,
-                                    client, depth, market)
+                                    direction, client, depth, market)
         await message.answer(text, reply_markup=kb)
         return
 
     try:
-        name, price, qty = _parse_watch_args(txt)
+        name, price, qty, direction = _parse_watch_args(txt)
     except ValueError:
         name = None
     if name is not None:
         text, kb = await _add_watch(uid, message.chat.id, name, price, qty,
-                                    client, depth, market)
+                                    direction, client, depth, market)
         await message.answer(text, reply_markup=kb)
         return
 
@@ -591,9 +729,73 @@ async def on_callback(cb: CallbackQuery, client, depth, market):
         await cb.message.answer("Напиши назву скіна — покажу ціни на всіх ринках.")
         await cb.answer()
         return
-    if action == "lst":
-        text, kb = await _list_view(uid, market)
+    if action == "status":
+        text, kb = await _status_view(market, client, depth)
         await cb.message.answer(text, reply_markup=kb)
+        await cb.answer()
+        return
+    if action == "top":
+        parts = sid.split(":")
+        mode = parts[0] if parts and parts[0] in ("cheap", "spread") else "cheap"
+        text, kb = await _top_view(market, mode)
+        await cb.message.answer(text, reply_markup=kb)
+        await cb.answer()
+        return
+    if action == "srt":
+        if sid in ("state", "price", "name"):
+            _sort_mode[uid] = sid
+        text, kb = await _list_view(uid, market)
+        try:
+            await cb.message.edit_text(text, reply_markup=kb)
+        except Exception:
+            await cb.message.answer(text, reply_markup=kb)
+        await cb.answer(f"сортування: {sid}")
+        return
+    if action == "allmut":
+        n = await db.mute_all(uid, True)
+        text, kb = await _list_view(uid, market)
+        try:
+            await cb.message.edit_text(text, reply_markup=kb)
+        except Exception:
+            await cb.message.answer(text, reply_markup=kb)
+        await cb.answer(f"стишено: {n}")
+        return
+    if action == "clrdone":
+        n = await db.remove_triggered(uid)
+        text, kb = await _list_view(uid, market)
+        try:
+            await cb.message.edit_text(text, reply_markup=kb)
+        except Exception:
+            await cb.message.answer(text, reply_markup=kb)
+        await cb.answer(f"прибрано: {n}")
+        return
+    if action == "snz":
+        parts = sid.split(":")
+        try:
+            wid = int(parts[0])
+        except (ValueError, IndexError):
+            await cb.answer()
+            return
+        if len(parts) == 1:  # показати підменю
+            await cb.message.answer(f"Тиша для #{wid}:", reply_markup=keyboards.snooze_kb(wid))
+            await cb.answer()
+            return
+        mins = int(parts[1])
+        await db.snooze(uid, wid, mins)
+        text, kb = await _watch_card(uid, wid, market)
+        await cb.message.answer(text, reply_markup=kb)
+        await cb.answer(f"тиша {mins // 60} год" if mins >= 60 else f"тиша {mins} хв")
+        return
+    if action == "lst":
+        try:
+            page = int(sid)
+        except ValueError:
+            page = 0
+        text, kb = await _list_view(uid, market, page)
+        try:
+            await cb.message.edit_text(text, reply_markup=kb)
+        except Exception:
+            await cb.message.answer(text, reply_markup=kb)
         await cb.answer()
         return
     if action == "pk":

@@ -14,6 +14,7 @@ from .lis import LisClient
 from .market import Market
 from .poller import run_depth_refresher, run_poller
 from .sources import build_sources
+from .steam import SteamPrices
 
 logging.basicConfig(
     level=logging.INFO,
@@ -32,7 +33,8 @@ async def main():
 
     depth = DepthIndex(cfg)
     ext_sources = build_sources(cfg)
-    market = Market(client, depth, ext_sources)
+    steam = SteamPrices(cfg.steam_enabled)
+    market = Market(client, depth, ext_sources, steam)
     if ext_sources:
         log.info("external markets: %s", ", ".join(s.key for s in ext_sources))
 
@@ -65,6 +67,7 @@ async def main():
                 pass
         await client.aclose()
         await depth.aclose()
+        await steam.aclose()
         for s in ext_sources:
             await s.aclose()
         await db.close()

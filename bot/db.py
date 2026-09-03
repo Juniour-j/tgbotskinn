@@ -1,7 +1,7 @@
 """SQLite-сховище стежень (aiosqlite). Одне довге зʼєднання на процес."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import aiosqlite
 
@@ -15,8 +15,10 @@ CREATE TABLE IF NOT EXISTS watches (
     game         TEXT    NOT NULL DEFAULT 'csgo',
     skin_name    TEXT    NOT NULL,
     target_price REAL    NOT NULL,
+    direction    TEXT    NOT NULL DEFAULT 'down',
     min_qty      INTEGER NOT NULL DEFAULT 1,
     muted        INTEGER NOT NULL DEFAULT 0,
+    muted_until  TEXT,
     triggered    INTEGER NOT NULL DEFAULT 0,
     last_price   REAL,
     created_at   TEXT    NOT NULL,
@@ -30,11 +32,29 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_watches_uniq
 # прості міграції для БД, створених ранішими версіями
 _MIGRATIONS = [
     "ALTER TABLE watches ADD COLUMN min_qty INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE watches ADD COLUMN direction TEXT NOT NULL DEFAULT 'down'",
+    "ALTER TABLE watches ADD COLUMN muted_until TEXT",
 ]
 
 
+def _now_dt() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return _now_dt().isoformat(timespec="seconds")
+
+
+def is_muted(row) -> bool:
+    if row["muted"]:
+        return True
+    mu = row["muted_until"]
+    if mu:
+        try:
+            return datetime.fromisoformat(mu) > _now_dt()
+        except ValueError:
+            return False
+    return False
 
 
 async def init_db(path: str):
@@ -57,25 +77,21 @@ async def close():
 
 
 async def add_watch(user_id: int, chat_id: int, skin_name: str, target_price: float,
-                    game: str = "csgo", min_qty: int = 1):
-    """
-    Повертає (id, action), де action:
-      "created" — нове стеження,
-      "updated" — таке (user+game+skin+price) вже було, оновили min_qty.
-    """
+                    game: str = "csgo", min_qty: int = 1, direction: str = "down"):
+    """(id, "created"|"updated")."""
     try:
         cur = await _db.execute(
-            "INSERT INTO watches(user_id, chat_id, game, skin_name, target_price, min_qty, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (user_id, chat_id, game, skin_name, target_price, min_qty, _now()),
+            "INSERT INTO watches(user_id, chat_id, game, skin_name, target_price, "
+            "direction, min_qty, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (user_id, chat_id, game, skin_name, target_price, direction, min_qty, _now()),
         )
         await _db.commit()
         return cur.lastrowid, "created"
     except aiosqlite.IntegrityError:
         await _db.execute(
-            "UPDATE watches SET min_qty=?, triggered=0 "
+            "UPDATE watches SET direction=?, min_qty=?, triggered=0, muted=0, muted_until=NULL "
             "WHERE user_id=? AND game=? AND skin_name=? AND target_price=?",
-            (min_qty, user_id, game, skin_name, target_price),
+            (direction, min_qty, user_id, game, skin_name, target_price),
         )
         await _db.commit()
         cur = await _db.execute(
@@ -108,11 +124,29 @@ async def remove_watch(user_id: int, watch_id: int) -> bool:
     return cur.rowcount > 0
 
 
-async def set_target(user_id: int, watch_id: int, price: float, min_qty: int = 1) -> bool:
+async def remove_triggered(user_id: int) -> int:
     cur = await _db.execute(
-        "UPDATE watches SET target_price=?, min_qty=?, triggered=0 "
+        "DELETE FROM watches WHERE user_id=? AND triggered=1", (user_id,)
+    )
+    await _db.commit()
+    return cur.rowcount
+
+
+async def mute_all(user_id: int, muted: bool) -> int:
+    cur = await _db.execute(
+        "UPDATE watches SET muted=?, muted_until=NULL WHERE user_id=?",
+        (1 if muted else 0, user_id),
+    )
+    await _db.commit()
+    return cur.rowcount
+
+
+async def set_target(user_id: int, watch_id: int, price: float, min_qty: int = 1,
+                     direction: str = "down") -> bool:
+    cur = await _db.execute(
+        "UPDATE watches SET target_price=?, min_qty=?, direction=?, triggered=0 "
         "WHERE user_id=? AND id=?",
-        (price, min_qty, user_id, watch_id),
+        (price, min_qty, direction, user_id, watch_id),
     )
     await _db.commit()
     return cur.rowcount > 0
@@ -120,8 +154,18 @@ async def set_target(user_id: int, watch_id: int, price: float, min_qty: int = 1
 
 async def set_muted(user_id: int, watch_id: int, muted: bool) -> bool:
     cur = await _db.execute(
-        "UPDATE watches SET muted=? WHERE user_id=? AND id=?",
+        "UPDATE watches SET muted=?, muted_until=NULL WHERE user_id=? AND id=?",
         (1 if muted else 0, user_id, watch_id),
+    )
+    await _db.commit()
+    return cur.rowcount > 0
+
+
+async def snooze(user_id: int, watch_id: int, minutes: int) -> bool:
+    until = (_now_dt() + timedelta(minutes=minutes)).isoformat(timespec="seconds")
+    cur = await _db.execute(
+        "UPDATE watches SET muted=0, muted_until=? WHERE user_id=? AND id=?",
+        (until, user_id, watch_id),
     )
     await _db.commit()
     return cur.rowcount > 0
@@ -130,6 +174,12 @@ async def set_muted(user_id: int, watch_id: int, muted: bool) -> bool:
 async def all_watches():
     cur = await _db.execute("SELECT * FROM watches")
     return await cur.fetchall()
+
+
+async def count_watches() -> int:
+    cur = await _db.execute("SELECT COUNT(*) AS c FROM watches")
+    row = await cur.fetchone()
+    return row["c"] if row else 0
 
 
 async def watched_names() -> set:

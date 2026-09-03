@@ -10,17 +10,20 @@ def _mk(cls):
 
 def test_mcsgo_parse():
     s = _mk(McsgoSource)
-    payload = {"success": True, "items": [
-        {"market_hash_name": "Kilowatt Case", "price": "0.128", "volume": "340"},
-        {"market_hash_name": "Bad", "price": "0"},
-        {"market_hash_name": "NoPrice"},
-    ]}
+    # class_instance-фід: items — словник classid_instanceid -> {...}
+    payload = {"success": True, "items": {
+        "1_1": {"market_hash_name": "Kilowatt Case", "price": "0.315", "buy_order": 0.10},
+        "1_2": {"market_hash_name": "Kilowatt Case", "price": "0.128", "buy_order": 0.098},
+        "2_1": {"market_hash_name": "Bad", "price": "0"},
+        "3_1": {"market_hash_name": "NoPrice"},
+    }}
     s._by_norm = s._parse(payload)
     q = s.lookup("Kilowatt Case")
-    assert q is not None and abs(q.price - 0.128) < 1e-9 and q.qty == 340
+    assert q is not None and abs(q.price - 0.128) < 1e-9   # беремо найдешевший
+    assert abs(q.buy_order - 0.098) < 1e-9
+    assert q.name == "Kilowatt Case"
     assert "market.csgo.com" in q.url
     assert s.lookup("Bad") is None and s.lookup("NoPrice") is None
-    # нормалізація: інший регістр / зайві пробіли
     assert s.lookup("kilowatt   case") is not None
 
 

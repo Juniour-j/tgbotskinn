@@ -22,14 +22,16 @@ def _n(x) -> str:
     return f"{int(x):,}".replace(",", " ")
 
 
-def _price_alert(name, target, market):
+def _price_alert(name, target, direction, market):
     qs = sorted(market.quotes(name), key=lambda t: t[2].price)
     best = qs[0] if qs else None
+    sign = "≥" if direction == "up" else "≤"
     lines = [f"🔔 <b>Ціль досягнута</b>  ·  <b>{_esc(name)}</b>"]
     kb = None
     if best is not None:
         _, lbl, q = best
-        inner = [f"<b>${q.price:.2f}</b> на {lbl}   ·   ціль ≤ ${target:.2f}"]
+        bo = f"  ·  скуп ${q.buy_order:.2f}" if q.buy_order else ""
+        inner = [f"<b>${q.price:.2f}</b> на {lbl}{bo}   ·   ціль {sign} ${target:.2f}"]
         others = [f"{l} ${x.price:.2f}" for _, l, x in qs[1:]]
         if others:
             inner.append("інші: " + " · ".join(others))
@@ -65,6 +67,7 @@ async def _cycle(bot, client, depth, market):
     for w in await db.all_watches():
         name = w["skin_name"]
         min_qty = w["min_qty"] or 1
+        muted = db.is_muted(w)
         best = market.best(name)
         price = best[2].price if best else None
 
@@ -74,7 +77,7 @@ async def _cycle(bot, client, depth, market):
                 continue
             met = qty >= min_qty
             if met and not w["triggered"]:
-                if not w["muted"]:
+                if not muted:
                     txt, kb = _qty_alert(w, name, qty, depth, market)
                     try:
                         await bot.send_message(w["chat_id"], txt, reply_markup=kb)
@@ -88,12 +91,13 @@ async def _cycle(bot, client, depth, market):
                 await db.set_last_price(w["id"], price)
             continue
 
-        decision = alerts.evaluate(w["target_price"], bool(w["triggered"]), price)
+        decision = alerts.evaluate(w["target_price"], bool(w["triggered"]),
+                                   price, w["direction"])
         if decision == "fire":
-            if w["muted"]:
+            if muted:
                 await db.set_last_price(w["id"], price)
                 continue
-            txt, kb = _price_alert(name, w["target_price"], market)
+            txt, kb = _price_alert(name, w["target_price"], w["direction"], market)
             try:
                 await bot.send_message(w["chat_id"], txt, reply_markup=kb)
             except Exception:

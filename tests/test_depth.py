@@ -81,16 +81,18 @@ def test_fill_price():
 
 
 @pytest.mark.parametrize("raw,expected", [
-    ("AWP | Asiimov (Field-Tested) 55", ("AWP | Asiimov (Field-Tested)", 55.0, 1)),
-    ("Sealed Dead Hand Terminal 0.44 x200", ("Sealed Dead Hand Terminal", 0.44, 200)),
-    ("Kilowatt Case 0,13 х50", ("Kilowatt Case", 0.13, 50)),
-    ("Fever Case $0.54 X10", ("Fever Case", 0.54, 10)),
+    ("AWP | Asiimov (Field-Tested) 55", ("AWP | Asiimov (Field-Tested)", 55.0, 1, "down")),
+    ("Sealed Dead Hand Terminal 0.44 x200", ("Sealed Dead Hand Terminal", 0.44, 200, "down")),
+    ("Kilowatt Case 0,13 х50", ("Kilowatt Case", 0.13, 50, "down")),
+    ("Fever Case $0.54 X10", ("Fever Case", 0.54, 10, "down")),
+    ("Kilowatt Case 0.20 вгору", ("Kilowatt Case", 0.20, 1, "up")),
+    ("Kilowatt Case >0.20", ("Kilowatt Case", 0.20, 1, "up")),
 ])
 def test_parse_watch_args_ok(raw, expected):
     assert _parse_watch_args(raw) == expected
 
 
-@pytest.mark.parametrize("raw", ["", "OnlyName", "Name x50", "Name -1", "Name 0"])
+@pytest.mark.parametrize("raw", ["", "OnlyName", "Name x50", "Name -1", "Name 0", "Name вгору"])
 def test_parse_watch_args_bad(raw):
     with pytest.raises(ValueError):
         _parse_watch_args(raw)
