@@ -174,6 +174,13 @@ def after_add_kb(wid: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Глибина", callback_data=f"dep:{wid}"),
          InlineKeyboardButton(text="⚙️ Керувати", callback_data=f"w:{wid}")],
+        [InlineKeyboardButton(text="➕ Ще", callback_data="add"), _LIST, _HOME],
+    ])
+
+
+def compare_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Стежити", callback_data="cwatch")],
         [_LIST, _HOME],
     ])
 

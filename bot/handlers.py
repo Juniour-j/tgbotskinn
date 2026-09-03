@@ -6,6 +6,7 @@ import html
 import logging
 import re
 import time
+from datetime import datetime as _dtm, timezone as _tz
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -61,6 +62,30 @@ _last_search: dict[int, list] = {}      # user_id -> список знайден
 _sort_mode: dict[int, str] = {}         # user_id -> "state"|"price"|"name"
 _last_deleted: dict[int, dict] = {}     # user_id -> {skin_name,target_price,min_qty,direction}
 _last_top: dict[int, list] = {}         # user_id -> назви з останнього /top
+_last_compare: dict[int, str] = {}      # user_id -> назва з останнього /compare
+
+
+def _ago(sec: float) -> str:
+    if sec < 0:
+        return "—"
+    if sec < 60:
+        return "щойно"
+    if sec < 3600:
+        return f"{int(sec // 60)} хв тому"
+    if sec < 86400:
+        return f"{int(sec // 3600)} год тому"
+    return f"{int(sec // 86400)} дн тому"
+
+
+def _notified_ago(row) -> str:
+    na = row["notified_at"]
+    if not na:
+        return ""
+    try:
+        dt = _dtm.fromisoformat(na)
+    except ValueError:
+        return ""
+    return _ago((_dtm.now(_tz.utc) - dt).total_seconds())
 
 
 async def _show(cb: CallbackQuery, text: str, kb, toast: str | None = None):
@@ -270,11 +295,11 @@ async def _status_view(market, client, depth):
         f"аптайм: {upt}",
         f"стежень: {n_w}",
         f"каталог lis: {len(client.names)} назв",
-        f"глибина lis: {'—' if depth.age_min() < 0 else f'{depth.age_min()} хв тому'}",
+        f"глибина lis: {'—' if depth.age_min() < 0 else _ago(depth.age_min() * 60)}",
     ]
     for s in market.sources:
         st = s.status()
-        age = "—" if st["age_s"] < 0 else f"{st['age_s'] // 60} хв тому"
+        age = _ago(st["age_s"])
         warn = f"  ⚠️ помилок: {st['fails']}" if st["fails"] else ""
         lines.append(f"{s.label}: {st['items']} поз · {age}{warn}")
     lines.append(f"Steam: {'увімкнено' if market.steam and market.steam.enabled else 'вимкнено'}")
@@ -346,6 +371,19 @@ async def _ask_price(cb, name: str, market, edit_wid=None, direction="down"):
     await cb.answer()
 
 
+async def _depth_followup(cb, uid, wid, name, client, depth, market):
+    """Дочекатись першого завантаження глибини і перемалювати /depth."""
+    for _ in range(15):  # ~75 с
+        await asyncio.sleep(5)
+        if depth.has(name):
+            text, kb = await _depth_view(uid, wid, client, depth, market)
+            try:
+                await cb.message.edit_text(text, reply_markup=kb)
+            except Exception:
+                pass
+            return
+
+
 async def _steam_followup(cb, name, market, render):
     """Дотягнути ціну Steam і перемалювати екран, коли зʼявиться."""
     try:
@@ -414,6 +452,9 @@ async def _watch_card(user_id: int, wid: int, market):
             else:
                 note = "" if gap <= 0 else f"  ·  ще −${gap:.2f}"
             inner.append(f"<b>Зараз</b>  <b>${best[2].price:.2f}</b> — {best[1]}{note}")
+    if w["triggered"]:
+        na = _notified_ago(w)
+        inner.append(f"<b>Алерт</b>  надіслано {na}" if na else "<b>Алерт</b>  надіслано")
     lines = [f"<b>#{wid} · {_esc(name)}</b>", "",
              "<blockquote>" + "\n".join(inner) + "</blockquote>"]
     qs = sorted(market.quotes(name), key=lambda x: x[2].price)
@@ -446,7 +487,7 @@ async def _depth_view(user_id: int, wid: int, client, depth, market):
     mx = max((q for _, q in rungs), default=1)
     out = [f"<b>📊 {_esc(name)}</b>  ·  lis-skins"]
     if sp is not None:
-        out.append(f"ціна на сайті <b>${sp:.2f}</b>  ·  оновлено {depth.age_min()} хв тому")
+        out.append(f"ціна на сайті <b>${sp:.2f}</b>  ·  оновлено {_ago(depth.age_min() * 60)}")
     body = [f"{'ціна':<6}{'шт':>8} {'сумарно':>9}", "─" * 30]
     cum = 0
     for p, q in rungs:
@@ -470,10 +511,11 @@ async def _depth_view(user_id: int, wid: int, client, depth, market):
     return "\n".join(out), keyboards.depth_kb(wid)
 
 
-async def _compare_view(name: str, market):
+async def _compare_view(uid: int, name: str, market):
+    _last_compare[uid] = name
     qs = sorted(market.quotes(name), key=lambda t: t[2].price)
     if not qs:
-        return f"<b>{_esc(name)}</b>\n\nЦіни ніде не знайшов.", keyboards.back_kb()
+        return f"<b>{_esc(name)}</b>\n\nЦіни ніде не знайшов.", keyboards.compare_kb()
     rows = []
     for i, (_, lbl, q) in enumerate(qs):
         mark = "▸ " if i == 0 else "  "
@@ -493,7 +535,7 @@ async def _compare_view(name: str, market):
         pct = (hi - lo) / hi * 100 if hi else 0
         out.append(f"найдешевше <b>{qs[0][1]}</b> — на {pct:.0f}% нижче "
                    f"(розкид ${hi - lo:.2f})")
-    return "\n".join(out), keyboards.back_kb()
+    return "\n".join(out), keyboards.compare_kb()
 
 
 async def _add_watch(uid: int, chat_id: int, raw_name: str, price: float,
@@ -648,7 +690,7 @@ async def cmd_compare(message: Message, command: CommandObject, client, market):
         return
     canonical, _ = matcher.resolve(q, client.names)
     name = canonical or q
-    text, kb = await _compare_view(name, market)
+    text, kb = await _compare_view(message.from_user.id, name, market)
     await message.answer(text, reply_markup=kb)
 
 
@@ -768,7 +810,7 @@ async def on_text(message: Message, client, depth, market):
     if uid in _pending_compare:
         _pending_compare.discard(uid)
         canonical, _ = matcher.resolve(txt, client.names)
-        text, kb = await _compare_view(canonical or txt, market)
+        text, kb = await _compare_view(uid, canonical or txt, market)
         await message.answer(text, reply_markup=kb)
         return
 
@@ -886,6 +928,19 @@ async def on_callback(cb: CallbackQuery, client, depth, market):
         await cb.message.answer("Напиши назву скіна — покажу ціни на всіх ринках.")
         await cb.answer()
         return
+    if action == "cwatch":
+        name = _last_compare.get(uid)
+        if not name:
+            await cb.answer("застаріло")
+            return
+        canonical, _ = matcher.resolve(name, client.names)
+        if canonical is None:
+            await cb.message.answer(f"«{_esc(name)}» нема в каталозі lis-skins.")
+            await cb.answer()
+            return
+        _pending_price[uid] = canonical
+        await _ask_price(cb, canonical, market)
+        return
     if action == "pk":
         try:
             name = _last_search.get(uid, [])[int(sid)]
@@ -990,7 +1045,11 @@ async def on_callback(cb: CallbackQuery, client, depth, market):
                 cb, w["skin_name"], market, lambda: _watch_card(uid, wid, market)))
         return
     if action == "dep":
+        w = await db.get_watch(uid, wid)
         await _show(cb, *await _depth_view(uid, wid, client, depth, market))
+        if w is not None and not depth.has(w["skin_name"]):
+            asyncio.create_task(_depth_followup(
+                cb, uid, wid, w["skin_name"], client, depth, market))
         return
     if action == "cmp":
         w = await db.get_watch(uid, wid)
@@ -998,9 +1057,9 @@ async def on_callback(cb: CallbackQuery, client, depth, market):
             await cb.answer("нема такого")
             return
         nm = w["skin_name"]
-        await _show(cb, *await _compare_view(nm, market))
+        await _show(cb, *await _compare_view(uid, nm, market))
         asyncio.create_task(_steam_followup(
-            cb, nm, market, lambda: _compare_view(nm, market)))
+            cb, nm, market, lambda: _compare_view(uid, nm, market)))
         return
     if action == "ed":
         w = await db.get_watch(uid, wid)
