@@ -25,14 +25,15 @@ def _n(x) -> str:
 def _price_alert(name, target, market):
     qs = sorted(market.quotes(name), key=lambda t: t[2].price)
     best = qs[0] if qs else None
-    lines = [f"🔔 <b>Ціль досягнута</b>", f"<b>{_esc(name)}</b>", ""]
+    lines = [f"🔔 <b>Ціль досягнута</b>  ·  <b>{_esc(name)}</b>"]
     kb = None
     if best is not None:
         _, lbl, q = best
-        lines.append(f"<b>${q.price:.2f}</b> на {lbl}   (ціль ≤ ${target:.2f})")
+        inner = [f"<b>${q.price:.2f}</b> на {lbl}   ·   ціль ≤ ${target:.2f}"]
         others = [f"{l} ${x.price:.2f}" for _, l, x in qs[1:]]
         if others:
-            lines.append("інші: " + " · ".join(others))
+            inner.append("інші: " + " · ".join(others))
+        lines.append("<blockquote>" + "\n".join(inner) + "</blockquote>")
         if q.url:
             kb = keyboards.alert_kb(lbl, q.url)
     return "\n".join(lines), kb
@@ -40,12 +41,7 @@ def _price_alert(name, target, market):
 
 def _qty_alert(watch, name, qty, depth, market):
     t = watch["target_price"]
-    lines = [
-        "🔔 <b>Обсяг зібрався</b>",
-        f"<b>{_esc(name)}</b>",
-        "",
-        f"можна купити <b>{_n(qty)} шт</b> по ≤ ${t:.2f}  (треба {watch['min_qty']})",
-    ]
+    inner = [f"можна купити <b>{_n(qty)} шт</b> по ≤ ${t:.2f}   ·   треба {watch['min_qty']}"]
     sp = depth.site_price(name)
     fp = depth.fill_price(name, watch["min_qty"])
     parts = []
@@ -54,10 +50,12 @@ def _qty_alert(watch, name, qty, depth, market):
     if fp is not None:
         parts.append(f"набрати {watch['min_qty']} від ${fp:.2f}")
     if parts:
-        lines.append("  ·  ".join(parts))
+        inner.append("  ·  ".join(parts))
     other = [f"{l} ${q.price:.2f}" for k, l, q in market.quotes(name) if k != "lis"]
     if other:
-        lines.append("інші ринки: " + " · ".join(other))
+        inner.append("інші ринки: " + " · ".join(other))
+    lines = [f"🔔 <b>Обсяг зібрався</b>  ·  <b>{_esc(name)}</b>",
+             "<blockquote>" + "\n".join(inner) + "</blockquote>"]
     q_lis = next((q for k, _, q in market.quotes(name) if k == "lis"), None)
     kb = keyboards.alert_kb("lis-skins", q_lis.url) if q_lis and q_lis.url else None
     return "\n".join(lines), kb

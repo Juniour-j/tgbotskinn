@@ -18,27 +18,27 @@ router = Router()
 HELP = (
     "<b>Що я вмію</b>\n"
     "Слідкую за цінами скінів CS2 і пишу, коли ціна впаде до потрібної.\n"
-    "Порівнюю 3 ринки — <b>lis-skins</b>, <b>market.csgo</b>, <b>Skinport</b> — і беру найдешевший.\n\n"
+    "Порівнюю 3 ринки — <b>lis-skins</b>, <b>market.csgo</b>, <b>Skinport</b> — беру найдешевший.\n\n"
     "<b>Як додати</b>\n"
     "Напиши одним рядком назву й ціль у $:\n"
-    "<code>Kilowatt Case 0.13</code>\n"
-    "<code>AWP | Asiimov (Field-Tested) 55</code>\n"
+    "<blockquote><code>Kilowatt Case 0.13</code>\n"
+    "<code>AWP | Asiimov (Field-Tested) 55</code></blockquote>"
     "→ сповіщу, щойно будь-де стане ≤ цієї ціни.\n\n"
-    "<b>Стеження за обсягом</b> — додай <code>x&lt;кількість&gt;</code>:\n"
-    "<code>Kilowatt Case 0.13 x200</code>\n"
+    "<b>За обсягом</b> — додай <code>x&lt;кількість&gt;</code>:\n"
+    "<blockquote><code>Kilowatt Case 0.13 x200</code></blockquote>"
     "→ сповіщу, коли на lis-skins можна <b>купити</b> 200+ шт по ≤ $0.13.\n\n"
-    "Не знаєш точну назву — напиши частину («kilowatt»), покажу варіанти кнопками.\n\n"
-    "У списку під кожним стеженням: <b>📊 Глибина</b> і <b>⚙️ Керувати</b>\n"
-    "(там: 🔗 відкрити, ✏️ змінити ціль, 🔀 порівняти, 🔕 звук, 🗑 видалити)."
+    "Не знаєш назву — напиши частину («kilowatt»), покажу варіанти.\n\n"
+    "У списку: <b>📊 Глибина</b> і <b>⚙️ Керувати</b> "
+    "(🔗 відкрити · ✏️ змінити ціль · 🔀 порівняти · 🔕 звук · 🗑 видалити)."
 )
 
 _ADD_PROMPT = (
-    "<b>Напиши назву скіна і ціль у $</b> одним рядком:\n\n"
-    "<code>Kilowatt Case 0.13</code>\n"
-    "   → сповіщу, коли ціна впаде до $0.13\n\n"
-    "<code>Kilowatt Case 0.13 x200</code>\n"
-    "   → сповіщу, коли можна купити 200+ шт по ≤ $0.13\n\n"
-    "Не знаєш точну назву — напиши частину, покажу варіанти.\n"
+    "<b>Напиши назву скіна і ціль у $</b>\n\n"
+    "<blockquote><code>Kilowatt Case 0.13</code></blockquote>"
+    "→ сповіщу, коли ціна впаде до $0.13\n\n"
+    "<blockquote><code>Kilowatt Case 0.13 x200</code></blockquote>"
+    "→ сповіщу, коли можна купити 200+ шт по ≤ $0.13\n\n"
+    "Не знаєш назву — напиши частину, покажу варіанти.\n"
     "Або обери популярний кейс кнопкою ⬇️"
 )
 
@@ -133,11 +133,10 @@ async def _list_view(user_id: int, market):
     rows = await db.list_watches(user_id)
     if not rows:
         return ("<b>Ще нема жодного стеження.</b>\n\n"
-                "Тисни ➕ Додати або просто напиши «назва ціна»:\n"
-                "<code>Kilowatt Case 0.13</code>"), keyboards.add_kb()
+                "Тисни ➕ Додати або просто напиши назву й ціль:\n"
+                "<blockquote><code>Kilowatt Case 0.13</code></blockquote>"), keyboards.add_kb()
     depth = market.depth
-    done = 0
-    blocks = []
+    items = []  # (sortkey, block, met_active)
     for r in rows:
         name = _esc(r["skin_name"])
         t = r["target_price"]
@@ -147,33 +146,33 @@ async def _list_view(user_id: int, market):
             met = have is not None and have >= r["min_qty"]
             fp = depth.fill_price(r["skin_name"], r["min_qty"])
             now = f"{_n(have)} шт" if have is not None else "…"
-            extra = f"\nнабрати {r['min_qty']} шт: від <b>${fp:.2f}</b>" if fp else ""
-            blocks.append(
-                f"{_icon(r, met)} <b>#{r['id']} {name}</b> · опт ≥{r['min_qty']}\n"
-                f"ціль ≤ ${t:.2f} · зараз {now} по ≤ ${t:.2f}{extra}\n"
-                f"{mkt}"
+            fill = f" · набрати {r['min_qty']} від <b>${fp:.2f}</b>" if fp else ""
+            block = (
+                f"<blockquote>{_icon(r, met)} <b>#{r['id']} {name}</b>  · опт ≥{r['min_qty']}\n"
+                f"ціль ≤ ${t:.2f}  ·  зараз {now}{fill}\n"
+                f"<i>{mkt}</i></blockquote>"
             )
         else:
             best = market.best(r["skin_name"])
             met = best is not None and best[2].price <= t
             if best is not None:
                 gap = best[2].price - t
-                tail = ("вже нижче цілі" if gap <= 0
-                        else f"ще −${gap:.2f} до цілі")
-                now = f"<b>${best[2].price:.2f}</b> ({_SHORT.get(best[1], best[1])}) · {tail}"
+                tail = "нижче цілі" if gap <= 0 else f"ще −${gap:.2f}"
+                now = f"<b>${best[2].price:.2f}</b> {_SHORT.get(best[1], best[1])} · {tail}"
             else:
                 now = "?"
-            blocks.append(
-                f"{_icon(r, met)} <b>#{r['id']} {name}</b>\n"
-                f"ціль ≤ ${t:.2f} · зараз {now}\n"
-                f"{mkt}"
+            block = (
+                f"<blockquote>{_icon(r, met)} <b>#{r['id']} {name}</b>\n"
+                f"ціль ≤ ${t:.2f}  ·  зараз {now}\n"
+                f"<i>{mkt}</i></blockquote>"
             )
-        if met and not r["muted"]:
-            done += 1
-    hdr = f"<b>📋 Стеження: {len(rows)}</b>"
-    if done:
-        hdr += f"  ·  ✅ {done}"
-    return hdr + "\n\n" + "\n\n".join(blocks), keyboards.list_kb(rows)
+        active = met and not r["muted"]
+        key = (1 if r["muted"] else 0, 0 if active else 1, r["id"])
+        items.append((key, block, active))
+    items.sort(key=lambda x: x[0])
+    done = sum(1 for _, _, a in items if a)
+    hdr = f"<b>Стеження</b> · {len(rows)}" + (f"   ✅ {done}" if done else "")
+    return hdr + "\n" + "\n".join(b for _, b, _ in items), keyboards.list_kb(rows)
 
 
 def _open_links(name: str, market):
@@ -190,29 +189,29 @@ async def _watch_card(user_id: int, wid: int, market):
         return f"Немає стеження #{wid}.", keyboards.back_kb()
     name, t, depth = w["skin_name"], w["target_price"], market.depth
     best = market.best(name)
-    lines = [f"<b>#{wid} · {_esc(name)}</b>", ""]
+    inner = []
     if w["min_qty"] > 1:
         have = depth.buyable_qty(name, t)
         met = have is not None and have >= w["min_qty"]
-        lines.append(f"Ціль:  ≥ {w['min_qty']} шт по ≤ <b>${t:.2f}</b>  (lis-skins)")
-        lines.append(f"Стан:  {_state(w, met)}")
+        inner.append(f"<b>Ціль</b>  ≥ {w['min_qty']} шт по ≤ <b>${t:.2f}</b>  (lis-skins)")
+        inner.append(f"<b>Стан</b>  {_state(w, met)}")
         if have is not None:
-            lines.append(f"Зараз: {_n(have)} шт по ≤ ${t:.2f}")
+            inner.append(f"<b>Зараз</b>  {_n(have)} шт по ≤ ${t:.2f}")
         fp = depth.fill_price(name, w["min_qty"])
         if fp is not None:
-            lines.append(f"Набрати {w['min_qty']} шт: від <b>${fp:.2f}</b>")
+            inner.append(f"<b>Набір</b>  {w['min_qty']} шт від <b>${fp:.2f}</b>")
     else:
         met = best is not None and best[2].price <= t
-        lines.append(f"Ціль:  ≤ <b>${t:.2f}</b>")
-        lines.append(f"Стан:  {_state(w, met)}")
+        inner.append(f"<b>Ціль</b>  ≤ <b>${t:.2f}</b>")
+        inner.append(f"<b>Стан</b>  {_state(w, met)}")
         if best is not None:
             gap = best[2].price - t
-            note = "" if gap <= 0 else f"  (ще −${gap:.2f})"
-            lines.append(f"Зараз: <b>${best[2].price:.2f}</b> — {best[1]}{note}")
+            note = "" if gap <= 0 else f"  ·  ще −${gap:.2f}"
+            inner.append(f"<b>Зараз</b>  <b>${best[2].price:.2f}</b> — {best[1]}{note}")
+    lines = [f"<b>#{wid} · {_esc(name)}</b>", "",
+             "<blockquote>" + "\n".join(inner) + "</blockquote>"]
     qs = sorted(market.quotes(name), key=lambda x: x[2].price)
     if qs:
-        lines.append("")
-        lines.append("Ціни по ринках:")
         rows = [f"{'▸ ' if i == 0 else '  '}{lbl:<12}{'$' + format(q.price, '.2f'):>8}"
                 for i, (_, lbl, q) in enumerate(qs)]
         lines.append("<pre>" + _esc("\n".join(rows)) + "</pre>")
@@ -237,14 +236,15 @@ async def _depth_view(user_id: int, wid: int, client, depth, market):
     sp = depth.site_price(name)
     rungs = depth.ladder(name, 12, from_price=sp)
     mx = max((q for _, q in rungs), default=1)
-    out = [f"<b>📊 {_esc(name)}</b> · lis-skins"]
+    out = [f"<b>📊 {_esc(name)}</b>  ·  lis-skins"]
     if sp is not None:
-        out.append(f"ціна на сайті <b>${sp:.2f}</b> · оновлено {depth.age_min()} хв тому")
-    body = [f"{'ціна':<7}{'шт':>8}   {'сумарно':>9}"]
+        out.append(f"ціна на сайті <b>${sp:.2f}</b>  ·  оновлено {depth.age_min()} хв тому")
+    body = [f"{'ціна':<6}{'шт':>8} {'сумарно':>9}", "─" * 30]
     cum = 0
     for p, q in rungs:
         cum += q
-        body.append(f"${p:<6.2f}{_n(q):>8}   {_n(cum):>9}  {_bar(q, mx)}")
+        wall = "  ◀" if q == mx else ""
+        body.append(f"${p:<5.2f}{_n(q):>8} {_n(cum):>9}  {_bar(q, mx)}{wall}")
     out.append("<pre>" + _esc("\n".join(body)) + "</pre>")
     q_want = w["min_qty"] if w["min_qty"] > 1 else 50
     fill = depth.fill_price(name, q_want)
@@ -269,12 +269,13 @@ async def _compare_view(name: str, market):
     rows = [f"{'▸ ' if i == 0 else '  '}{lbl:<12}{'$' + format(q.price, '.2f'):>8}"
             + (f"   {_n(q.qty)} шт" if q.qty else "")
             for i, (_, lbl, q) in enumerate(qs)]
-    out = [f"<b>🔀 {_esc(name)}</b>", "ціни зараз:", "",
+    out = [f"<b>🔀 {_esc(name)}</b>",
            "<pre>" + _esc("\n".join(rows)) + "</pre>"]
     if len(qs) > 1:
         lo, hi = qs[0][2].price, qs[-1][2].price
         pct = (hi - lo) / hi * 100 if hi else 0
-        out.append(f"розкид ${hi - lo:.2f} — найдешевше на {pct:.0f}% нижче за найдорожче")
+        out.append(f"найдешевше <b>{qs[0][1]}</b> — на {pct:.0f}% нижче "
+                   f"(розкид ${hi - lo:.2f})")
     return "\n".join(out), keyboards.back_kb()
 
 
