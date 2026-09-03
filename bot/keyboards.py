@@ -19,7 +19,7 @@ MAIN_KB = ReplyKeyboardMarkup(
 )
 
 _HOME = InlineKeyboardButton(text="🏠 Меню", callback_data="menu")
-_LIST = InlineKeyboardButton(text="📋 Список", callback_data="lst:0")
+_LIST = InlineKeyboardButton(text="📋 Список", callback_data="lst")  # "" -> остання сторінка
 
 # популярні кейси для швидкого додавання
 QUICK_ADD = (
@@ -39,7 +39,7 @@ PAGE = 8  # стежень на сторінку списку
 
 def menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📋 Мої стеження", callback_data="lst:0")],
+        [InlineKeyboardButton(text="📋 Мої стеження", callback_data="lst")],
         [InlineKeyboardButton(text="➕ Додати стеження", callback_data="add")],
         [InlineKeyboardButton(text="🔀 Порівняти ціни", callback_data="cmpask"),
          InlineKeyboardButton(text="💸 Топ", callback_data="top:cheap:0")],
@@ -67,6 +67,10 @@ _SORTS = ("state", "price", "name")
 _SORT_LBL = {"state": "за станом", "price": "за ціною", "name": "за назвою"}
 
 
+def sort_label(key: str) -> str:
+    return _SORT_LBL.get(key, key)
+
+
 def list_kb(page_rows, page: int, pages: int, sort: str,
             has_triggered: bool, undo: bool = False) -> InlineKeyboardMarkup:
     kb = []
@@ -77,8 +81,9 @@ def list_kb(page_rows, page: int, pages: int, sort: str,
             InlineKeyboardButton(text=f"⚙️ Керувати #{wid}", callback_data=f"w:{wid}"),
         ])
     if undo:
-        kb.append([InlineKeyboardButton(text="↩️ Повернути видалене",
-                                        callback_data="undo")])
+        n = undo if isinstance(undo, int) else 1
+        txt = f"↩️ Повернути видалене ({n})" if n > 1 else "↩️ Повернути видалене"
+        kb.append([InlineKeyboardButton(text=txt, callback_data="undo")])
     if pages > 1:
         nav = []
         if page > 0:

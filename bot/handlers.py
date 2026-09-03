@@ -35,7 +35,8 @@ HELP = (
     "Не знаєш назву — напиши частину («kilowatt»), покажу варіанти.\n\n"
     "У списку: <b>📊 Глибина</b> і <b>⚙️ Керувати</b> "
     "(🔗 відкрити · ✏️ змінити ціль · 🔀 порівняти · 🔕 тиша · 🗑 видалити).\n"
-    "Ще: <b>💸 Топ</b>, <b>📈 Статус</b>, <code>/compare назва</code>."
+    "Ще: <code>/top</code> · <code>/status</code> · <code>/compare назва</code> · "
+    "<code>/undo</code> (повернути видалене)."
 )
 
 _ADD_PROMPT = (
@@ -60,9 +61,26 @@ _pending_edit: dict[int, int] = {}      # user_id -> watch_id, чекаємо н
 _pending_compare: set[int] = set()      # user_id -> чекаємо назву для /compare
 _last_search: dict[int, list] = {}      # user_id -> список знайдених назв
 _sort_mode: dict[int, str] = {}         # user_id -> "state"|"price"|"name"
-_last_deleted: dict[int, dict] = {}     # user_id -> {skin_name,target_price,min_qty,direction}
+_last_deleted: dict[int, list] = {}     # user_id -> [{skin_name,target_price,min_qty,direction}, ...]
 _last_top: dict[int, list] = {}         # user_id -> назви з останнього /top
 _last_compare: dict[int, str] = {}      # user_id -> назва з останнього /compare
+_last_page: dict[int, int] = {}         # user_id -> остання сторінка списку
+
+
+def _stash_deleted(uid: int, row):
+    _last_deleted.setdefault(uid, []).append({
+        "skin_name": row["skin_name"], "target_price": row["target_price"],
+        "min_qty": row["min_qty"], "direction": row["direction"],
+    })
+    del _last_deleted[uid][:-20]  # тримаємо останні 20
+
+
+async def _restore_deleted(uid: int, chat_id: int) -> int:
+    items = _last_deleted.pop(uid, [])
+    for d in items:
+        await db.add_watch(uid, chat_id, d["skin_name"], d["target_price"],
+                           min_qty=d["min_qty"], direction=d["direction"])
+    return len(items)
 
 
 def _ago(sec: float) -> str:
@@ -169,8 +187,8 @@ def _menu_text() -> str:
         "📋 <b>Мої стеження</b> — список + керування\n"
         "➕ <b>Додати</b> — нове стеження за ціною\n"
         "🔀 <b>Порівняти ціни</b> — по всіх ринках для одного скіна\n"
-        "🔎 <b>Знайти скін</b> — пошук за назвою\n"
-        "❓ <b>Довідка</b> — як це працює"
+        "💸 <b>Топ</b> — найдешевші / найбільший розкид між ринками\n"
+        "🔎 <b>Знайти скін</b> · 📈 <b>Статус</b> · ❓ <b>Довідка</b>"
     )
 
 
@@ -278,8 +296,9 @@ async def _list_view(user_id: int, market, page: int = 0):
             last = _grp(e)
             parts.append(f"<b>{_GH[last]}</b>")
         parts.append(e[1])
+    _last_page[user_id] = page
     kb = keyboards.list_kb([e[0] for e in chunk], page, pages, sort, has_trig,
-                           undo=user_id in _last_deleted)
+                           undo=len(_last_deleted.get(user_id, [])))
     return hdr + "\n" + "\n".join(parts), kb
 
 
@@ -359,7 +378,7 @@ def _target_suggestions(price: float, direction: str):
     return out
 
 
-async def _ask_price(cb, name: str, market, edit_wid=None, direction="down"):
+def _price_prompt(name: str, market, edit_wid=None, direction="down"):
     best = market.best(name)
     txt = (f"«{_esc(name)}»\nНадішли ціль у $ — напр. <code>0.13</code>\n"
            "(або <code>0.13 x200</code> опт, <code>0.20 вгору</code> на зростання)")
@@ -367,6 +386,11 @@ async def _ask_price(cb, name: str, market, edit_wid=None, direction="down"):
     if best is not None:
         kb = keyboards.target_kb(_target_suggestions(best[2].price, direction), edit_wid)
         txt += f"\n\nАбо тапни підказку (зараз ${best[2].price:.2f}):"
+    return txt, kb
+
+
+async def _ask_price(cb, name: str, market, edit_wid=None, direction="down"):
+    txt, kb = _price_prompt(name, market, edit_wid, direction)
     await cb.message.answer(txt, reply_markup=kb)
     await cb.answer()
 
@@ -589,6 +613,11 @@ async def _add_watch(uid: int, chat_id: int, raw_name: str, price: float,
                 d = abs(q.price - price)
                 arrow = "+" if direction == "up" else "−"
                 lines.append(f"Зараз: <b>${q.price:.2f}</b> ({lbl}) — ще {arrow}${d:.2f} до цілі ⏳")
+                off = d / q.price * 100 if q.price else 0
+                if off > 40:
+                    side = "вище" if direction == "up" else "нижче"
+                    lines.append(f"<i>⚠️ ціль на {off:.0f}% {side} ринку — "
+                                 "може довго не спрацювати.</i>")
         else:
             lines.append("Ціна зʼявиться після наступного оновлення.")
             asyncio.create_task(_kick_depth(depth))
@@ -630,15 +659,12 @@ async def cmd_add(message: Message):
 @router.message(Command("undo"))
 async def cmd_undo(message: Message, market):
     uid = message.from_user.id
-    d = _last_deleted.pop(uid, None)
-    if not d:
+    n = await _restore_deleted(uid, message.chat.id)
+    if not n:
         await message.answer("Нема що повертати.", reply_markup=keyboards.back_kb())
         return
-    await db.add_watch(uid, message.chat.id, d["skin_name"], d["target_price"],
-                       min_qty=d["min_qty"], direction=d["direction"])
     text, kb = await _list_view(uid, market)
-    await message.answer("↩️ Повернув: " + _esc(d["skin_name"]) + "\n\n" + text,
-                         reply_markup=kb)
+    await message.answer(f"↩️ Повернув: {n}\n\n" + text, reply_markup=kb)
 
 
 @router.message(Command("menu"))
@@ -789,12 +815,21 @@ async def _do_search(message: Message, q: str, client, market):
     if not client.ready():
         await message.answer("Каталог ще вантажиться.")
         return
-    hits = [n for n, s in matcher.best_matches(q, client.names, 10)
-            if s > matcher.MIN_SUGGEST]
+    uid = message.from_user.id
+    scored = matcher.best_matches(q, client.names, 10)
+    hits = [n for n, s in scored if s > matcher.MIN_SUGGEST]
     if not hits:
-        await message.answer("Нічого не знайшов.", reply_markup=keyboards.menu_kb())
+        await message.answer("Нічого не знайшов. Спробуй іншу назву.",
+                             reply_markup=keyboards.menu_kb())
         return
-    _last_search[message.from_user.id] = hits
+    # один явний фаворит -> одразу питаємо ціну (без кроку вибору)
+    if len(hits) == 1 or (scored[0][1] >= 0.90
+                          and (len(scored) < 2 or scored[0][1] - scored[1][1] >= 0.15)):
+        _pending_price[uid] = hits[0]
+        t, k = _price_prompt(hits[0], market)
+        await message.answer(t, reply_markup=k)
+        return
+    _last_search[uid] = hits
     items = [(n, market.best(n)[2].price if market.best(n) else None) for n in hits]
     await message.answer("Вибери скін:", reply_markup=keyboards.find_kb(items))
 
@@ -885,33 +920,29 @@ async def on_callback(cb: CallbackQuery, client, depth, market):
         await _show(cb, *await _top_view(uid, market, mode))
         return
     if action == "lst":
-        try:
-            page = int(sid)
-        except ValueError:
-            page = 0
+        page = int(sid) if sid.isdigit() else _last_page.get(uid, 0)
         await _show(cb, *await _list_view(uid, market, page))
         return
     if action == "srt":
         if sid in ("state", "price", "name"):
             _sort_mode[uid] = sid
-        await _show(cb, *await _list_view(uid, market), toast=f"сорт: {sid}")
+        await _show(cb, *await _list_view(uid, market),
+                    toast="сорт: " + keyboards.sort_label(sid))
         return
     if action == "allmut":
         n = await db.mute_all(uid, True)
         await _show(cb, *await _list_view(uid, market), toast=f"стишено: {n}")
         return
     if action == "clrdone":
+        for r in [x for x in await db.list_watches(uid) if x["triggered"]]:
+            _stash_deleted(uid, r)
         n = await db.remove_triggered(uid)
         await _show(cb, *await _list_view(uid, market), toast=f"прибрано: {n}")
         return
     if action == "undo":
-        d = _last_deleted.pop(uid, None)
-        if d:
-            await db.add_watch(uid, cb.message.chat.id, d["skin_name"],
-                               d["target_price"], min_qty=d["min_qty"],
-                               direction=d["direction"])
+        n = await _restore_deleted(uid, cb.message.chat.id)
         await _show(cb, *await _list_view(uid, market),
-                    toast="↩️ повернуто" if d else "нема що повертати")
+                    toast=f"↩️ повернуто: {n}" if n else "нема що повертати")
         return
 
     # --- підказки (нове повідомлення, тут edit недоречний) ---
@@ -1073,10 +1104,7 @@ async def on_callback(cb: CallbackQuery, client, depth, market):
     if action == "del":
         w = await db.get_watch(uid, wid)
         if w is not None:
-            _last_deleted[uid] = {
-                "skin_name": w["skin_name"], "target_price": w["target_price"],
-                "min_qty": w["min_qty"], "direction": w["direction"],
-            }
+            _stash_deleted(uid, w)
         ok = await db.remove_watch(uid, wid)
         await _show(cb, *await _list_view(uid, market),
                     toast=f"#{wid} прибрано" if ok else "нема такого")
