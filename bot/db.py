@@ -72,8 +72,8 @@ def muted_label(row) -> str:
     if mins <= 0:
         return ""
     if mins > 90:
-        return f"🔕 ще {int(mins / 60)} год"
-    return f"🔕 ще {int(mins)} хв"
+        return f"🔕 ще {round(mins / 60)} год"
+    return f"🔕 ще {max(1, round(mins))} хв"
 
 
 async def init_db(path: str):

@@ -253,7 +253,8 @@ async def _list_view(user_id: int, market, page: int = 0):
             fp = depth.fill_price(r["skin_name"], r["min_qty"])
             now = f"{_n(have)} шт" if have is not None else "…"
             fill = f" · набрати {r['min_qty']} від <b>${fp:.2f}</b>" if fp else ""
-            block = (f"<blockquote>{_icon(r, met)} <b>#{r['id']} {name}</b>  · опт ≥{r['min_qty']}\n"
+            head = db.muted_label(r) or _icon(r, met)
+            block = (f"<blockquote>{head} <b>#{r['id']} {name}</b>  · опт ≥{r['min_qty']}\n"
                      f"ціль ≤ ${t:.2f}  ·  зараз {now}{fill}\n<i>{mkt}</i></blockquote>")
         else:
             met = best is not None and alerts.hit(t, best[2].price, r["direction"])
@@ -266,7 +267,8 @@ async def _list_view(user_id: int, market, page: int = 0):
                 now = f"<b>${best[2].price:.2f}</b> {_SHORT.get(best[1], best[1])} · {tail}"
             else:
                 now = "?"
-            block = (f"<blockquote>{_icon(r, met)} <b>#{r['id']} {name}</b>\n"
+            head = db.muted_label(r) or _icon(r, met)
+            block = (f"<blockquote>{head} <b>#{r['id']} {name}</b>\n"
                      f"ціль {sg} ${t:.2f}  ·  зараз {now}\n<i>{mkt}</i></blockquote>")
         entries.append((r, block, met and not db.is_muted(r), cheap))
 
@@ -408,28 +410,20 @@ async def _depth_followup(cb, uid, wid, name, client, depth, market):
             return
 
 
-async def _steam_followup(cb, name, market, render):
-    """Дотягнути ціну Steam і перемалювати екран, коли зʼявиться."""
+async def _steam_followup(msg_or_cb, name, market, render):
+    """Дотягнути ціну Steam і перемалювати екран (щоб зникло «вантажу…»)."""
+    msg = getattr(msg_or_cb, "message", msg_or_cb)
     try:
         if not (market.steam and market.steam.enabled):
             return
         if market.steam.cached(name) is not None:
             return
-        got = await market.steam.get(name)
-        if got is None:
-            return
+        await market.steam.get(name)
         text, kb = await render()
         try:
-            await cb.message.edit_text(text, reply_markup=kb)
+            await msg.edit_text(text, reply_markup=kb)
         except Exception:
             pass
-    except Exception:
-        pass
-
-
-async def _warm_steam(market, name):
-    try:
-        await market.steam.get(name)
     except Exception:
         pass
 
@@ -439,8 +433,8 @@ def _steam_note(name: str, best_price, market) -> str:
         return ""
     sp = market.steam.cached(name)
     if sp is None:
-        asyncio.create_task(_warm_steam(market, name))  # прогріємо на наступний раз
-        return ""
+        asyncio.create_task(market.steam.get(name))  # прогрів (get має свій кеш+лок)
+        return "<i>Steam: вантажу…</i>"
     if not sp:
         return ""
     if best_price and sp > 0:
@@ -495,6 +489,36 @@ async def _watch_card(user_id: int, wid: int, market):
 def _bar(q: int, mx: int, width: int = 10) -> str:
     filled = round(q / mx * width) if mx else 0
     return "█" * filled + "░" * (width - filled)
+
+
+def _depth_body(name: str, depth) -> list:
+    sp = depth.site_price(name)
+    rungs = depth.ladder(name, 12, from_price=sp)
+    mx = max((q for _, q in rungs), default=1)
+    out = [f"<b>📊 {_esc(name)}</b>  ·  lis-skins"]
+    if sp is not None:
+        out.append(f"ціна на сайті <b>${sp:.2f}</b>  ·  оновлено {_ago(depth.age_min() * 60)}")
+    body = [f"{'ціна':<6}{'шт':>8} {'сумарно':>9}", "─" * 30]
+    cum = 0
+    for p, q in rungs:
+        cum += q
+        wall = "  ◀" if q == mx else ""
+        body.append(f"${p:<5.2f}{_n(q):>8} {_n(cum):>9}  {_bar(q, mx)}{wall}")
+    out.append("<pre>" + _esc("\n".join(body)) + "</pre>")
+    fill = depth.fill_price(name, 50)
+    if fill is not None:
+        out.append(f"набрати 50 шт: від <b>${fill:.2f}</b>")
+    return out
+
+
+async def _depth_adhoc(name: str, depth, market):
+    out = _depth_body(name, depth)
+    other = [(lbl, q) for k, lbl, q in market.quotes(name) if k != "lis"]
+    if other:
+        out.append("")
+        out.append("інші ринки: " + "  ·  ".join(
+            f"{lbl} <b>${q.price:.2f}</b>" for lbl, q in other))
+    return "\n".join(out), keyboards.back_kb()
 
 
 async def _depth_view(user_id: int, wid: int, client, depth, market):
@@ -642,8 +666,8 @@ async def _kick_depth(depth):
 
 @router.message(Command("start"))
 async def cmd_start(message: Message):
-    await message.answer(HELP, reply_markup=keyboards.MAIN_KB)
-    await message.answer(_menu_text(), reply_markup=keyboards.menu_kb())
+    await message.answer(HELP + "\n\nКнопки внизу 👇 або /menu",
+                         reply_markup=keyboards.MAIN_KB)
 
 
 @router.message(Command("help"))
@@ -698,13 +722,19 @@ async def cmd_top(message: Message, market):
 
 @router.message(Command("depth"))
 async def cmd_depth(message: Message, command: CommandObject, client, depth, market):
-    try:
-        wid = int((command.args or "").strip())
-    except ValueError:
-        await message.answer("Формат: /depth <id>", reply_markup=keyboards.back_kb())
+    arg = (command.args or "").strip()
+    if arg.isdigit():
+        text, kb = await _depth_view(message.from_user.id, int(arg), client, depth, market)
+        await message.answer(text, reply_markup=kb)
         return
-    text, kb = await _depth_view(message.from_user.id, wid, client, depth, market)
-    await message.answer(text, reply_markup=kb)
+    if arg:
+        canonical, _ = matcher.resolve(arg, client.names)
+        if canonical and depth.has(canonical):
+            text, kb = await _depth_adhoc(canonical, depth, market)
+            await message.answer(text, reply_markup=kb)
+            return
+    await message.answer("Формат: /depth &lt;id&gt; або /depth &lt;назва&gt;",
+                         reply_markup=keyboards.back_kb())
 
 
 @router.message(Command("compare"))
@@ -717,7 +747,9 @@ async def cmd_compare(message: Message, command: CommandObject, client, market):
     canonical, _ = matcher.resolve(q, client.names)
     name = canonical or q
     text, kb = await _compare_view(message.from_user.id, name, market)
-    await message.answer(text, reply_markup=kb)
+    sent = await message.answer(text, reply_markup=kb)
+    asyncio.create_task(_steam_followup(
+        sent, name, market, lambda: _compare_view(message.from_user.id, name, market)))
 
 
 @router.message(Command("watch"))
@@ -819,8 +851,15 @@ async def _do_search(message: Message, q: str, client, market):
     scored = matcher.best_matches(q, client.names, 10)
     hits = [n for n, s in scored if s > matcher.MIN_SUGGEST]
     if not hits:
-        await message.answer("Нічого не знайшов. Спробуй іншу назву.",
-                             reply_markup=keyboards.menu_kb())
+        loose = [n for n, s in scored if s > 0.3][:5]
+        if loose:
+            _last_search[uid] = loose
+            its = [(n, market.best(n)[2].price if market.best(n) else None) for n in loose]
+            await message.answer("Точно не знайшов. Може, щось із цього:",
+                                 reply_markup=keyboards.find_kb(its))
+        else:
+            await message.answer("Нічого схожого. Спробуй іншу назву.",
+                                 reply_markup=keyboards.menu_kb())
         return
     # один явний фаворит -> одразу питаємо ціну (без кроку вибору)
     if len(hits) == 1 or (scored[0][1] >= 0.90
@@ -845,8 +884,11 @@ async def on_text(message: Message, client, depth, market):
     if uid in _pending_compare:
         _pending_compare.discard(uid)
         canonical, _ = matcher.resolve(txt, client.names)
-        text, kb = await _compare_view(uid, canonical or txt, market)
-        await message.answer(text, reply_markup=kb)
+        nm = canonical or txt
+        text, kb = await _compare_view(uid, nm, market)
+        sent = await message.answer(text, reply_markup=kb)
+        asyncio.create_task(_steam_followup(
+            sent, nm, market, lambda: _compare_view(uid, nm, market)))
         return
 
     # нова ціль для стеження, що редагується
@@ -931,13 +973,16 @@ async def on_callback(cb: CallbackQuery, client, depth, market):
         return
     if action == "allmut":
         n = await db.mute_all(uid, True)
-        await _show(cb, *await _list_view(uid, market), toast=f"стишено: {n}")
+        await _show(cb, *await _list_view(uid, market),
+                    toast=f"стишено всі ({n})" if n else "нема стежень")
         return
     if action == "clrdone":
-        for r in [x for x in await db.list_watches(uid) if x["triggered"]]:
+        trig = [x for x in await db.list_watches(uid) if x["triggered"]]
+        for r in trig:
             _stash_deleted(uid, r)
         n = await db.remove_triggered(uid)
-        await _show(cb, *await _list_view(uid, market), toast=f"прибрано: {n}")
+        await _show(cb, *await _list_view(uid, market),
+                    toast=f"прибрано: {n}" if n else "нема спрацьованих")
         return
     if action == "undo":
         n = await _restore_deleted(uid, cb.message.chat.id)
