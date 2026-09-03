@@ -42,31 +42,43 @@ class _JsonSource:
         self._by_norm: dict[str, Quote] = {}
         self._last = 0.0
         self._etag: str | None = None
+        self._fails = 0  # підряд невдалих спроб -> експоненційний бекоф
+
+    def _cur_interval(self) -> float:
+        # після кількох помилок відкладаємо запити (до ~1 год), щоб не спамити
+        return self.min_interval * min(2 ** self._fails, 64)
+
+    def _fail(self, msg: str):
+        # шумимо в лог лише перші кілька разів, далі тихо бекофимось
+        (log.warning if self._fails < 3 else log.debug)("%s %s", self.key, msg)
+        self._fails += 1
+        self._last = time.time()
 
     async def refresh(self) -> bool:
-        if time.time() - self._last < self.min_interval:
+        if time.time() - self._last < self._cur_interval():
             return False
         headers = {"If-None-Match": self._etag} if self._etag else {}
         try:
             r = await self._http.get(self._url, headers=headers)
         except httpx.HTTPError as e:
-            log.warning("%s fetch failed: %s", self.key, e or type(e).__name__)
+            self._fail(f"fetch failed: {e or type(e).__name__}")
             return False
         if r.status_code == 304:
+            self._fails = 0
             self._last = time.time()
             return False
         if r.status_code != 200:
-            log.warning("%s status %s", self.key, r.status_code)
-            self._last = time.time()
+            self._fail(f"status {r.status_code}")
             return False
         try:
             data = self._parse(r.json())
         except Exception:
-            log.exception("%s parse failed", self.key)
+            self._fail("parse failed")
             return False
         if data:
             self._by_norm = data
             self._etag = r.headers.get("ETag") or self._etag
+        self._fails = 0
         self._last = time.time()
         log.info("%s updated: %d items", self.key, len(self._by_norm))
         return True
