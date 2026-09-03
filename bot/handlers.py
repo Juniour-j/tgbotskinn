@@ -8,6 +8,7 @@ import re
 import time
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, Message
 
@@ -58,6 +59,19 @@ _pending_edit: dict[int, int] = {}      # user_id -> watch_id, чекаємо н
 _pending_compare: set[int] = set()      # user_id -> чекаємо назву для /compare
 _last_search: dict[int, list] = {}      # user_id -> список знайдених назв
 _sort_mode: dict[int, str] = {}         # user_id -> "state"|"price"|"name"
+_last_deleted: dict[int, dict] = {}     # user_id -> {skin_name,target_price,min_qty,direction}
+
+
+async def _show(cb: CallbackQuery, text: str, kb, toast: str | None = None):
+    """Перемалювати екран у тому ж повідомленні (fallback — нове)."""
+    try:
+        await cb.message.edit_text(text, reply_markup=kb)
+    except TelegramBadRequest as e:
+        if "not modified" not in str(e).lower():
+            await cb.message.answer(text, reply_markup=kb)
+    except Exception:
+        await cb.message.answer(text, reply_markup=kb)
+    await cb.answer(toast or None)
 
 
 # ---------- парсери ----------
@@ -207,13 +221,17 @@ async def _list_view(user_id: int, market, page: int = 0):
                      f"ціль {sg} ${t:.2f}  ·  зараз {now}\n<i>{mkt}</i></blockquote>")
         entries.append((r, block, met and not db.is_muted(r), cheap))
 
+    def _grp(e):
+        if db.is_muted(e[0]):
+            return 2
+        return 0 if e[2] else 1
+
     if sort == "price":
         entries.sort(key=lambda e: e[3])
     elif sort == "name":
         entries.sort(key=lambda e: e[0]["skin_name"].lower())
-    else:  # state
-        entries.sort(key=lambda e: (1 if db.is_muted(e[0]) else 0,
-                                    0 if e[2] else 1, e[0]["id"]))
+    else:
+        entries.sort(key=lambda e: (_grp(e), e[0]["id"]))
 
     pages = (len(entries) + keyboards.PAGE - 1) // keyboards.PAGE
     page = max(0, min(page, pages - 1))
@@ -221,9 +239,17 @@ async def _list_view(user_id: int, market, page: int = 0):
     done = sum(1 for _, _, a, _ in entries if a)
     has_trig = any(e[0]["triggered"] for e in entries)
     hdr = f"<b>Стеження</b> · {len(entries)}" + (f"   ✅ {done}" if done else "")
-    body = "\n".join(b for _, b, _, _ in chunk)
-    kb = keyboards.list_kb([e[0] for e in chunk], page, pages, sort, has_trig)
-    return hdr + "\n" + body, kb
+
+    _GH = {0: "✅ Готові", 1: "⏳ Чекають", 2: "🔕 Тиша"}
+    parts, last = [], None
+    for e in chunk:
+        if sort == "state" and _grp(e) != last:
+            last = _grp(e)
+            parts.append(f"<b>{_GH[last]}</b>")
+        parts.append(e[1])
+    kb = keyboards.list_kb([e[0] for e in chunk], page, pages, sort, has_trig,
+                           undo=user_id in _last_deleted)
+    return hdr + "\n" + "\n".join(parts), kb
 
 
 async def _status_view(market, client, depth):
@@ -282,10 +308,20 @@ def _mkt_row(lbl: str, q, first: bool) -> str:
     return line
 
 
-async def _steam_note(name: str, best_price, market) -> str:
+async def _warm_steam(market, name):
+    try:
+        await market.steam.get(name)
+    except Exception:
+        pass
+
+
+def _steam_note(name: str, best_price, market) -> str:
     if not (market.steam and market.steam.enabled):
         return ""
-    sp = await market.steam.get(name)
+    sp = market.steam.cached(name)
+    if sp is None:
+        asyncio.create_task(_warm_steam(market, name))  # прогріємо на наступний раз
+        return ""
     if not sp:
         return ""
     if best_price and sp > 0:
@@ -327,7 +363,7 @@ async def _watch_card(user_id: int, wid: int, market):
     if qs:
         rows = [_mkt_row(lbl, q, i == 0) for i, (_, lbl, q) in enumerate(qs)]
         lines.append("<pre>" + _esc("\n".join(rows)) + "</pre>")
-        sn = await _steam_note(name, qs[0][2].price, market)
+        sn = _steam_note(name, qs[0][2].price, market)
         if sn:
             lines.append(sn)
     return ("\n".join(lines),
@@ -389,7 +425,7 @@ async def _compare_view(name: str, market):
         rows.append(line)
     out = [f"<b>🔀 {_esc(name)}</b>",
            "<pre>" + _esc("\n".join(rows)) + "</pre>"]
-    sn = await _steam_note(name, qs[0][2].price, market)
+    sn = _steam_note(name, qs[0][2].price, market)
     if sn:
         out.append(sn)
     if len(qs) > 1:
@@ -480,6 +516,25 @@ async def cmd_start(message: Message):
 @router.message(Command("help"))
 async def cmd_help(message: Message):
     await message.answer(HELP, reply_markup=keyboards.menu_kb())
+
+
+@router.message(Command("add"))
+async def cmd_add(message: Message):
+    await message.answer(_ADD_PROMPT, reply_markup=keyboards.add_kb())
+
+
+@router.message(Command("undo"))
+async def cmd_undo(message: Message, market):
+    uid = message.from_user.id
+    d = _last_deleted.pop(uid, None)
+    if not d:
+        await message.answer("Нема що повертати.", reply_markup=keyboards.back_kb())
+        return
+    await db.add_watch(uid, message.chat.id, d["skin_name"], d["target_price"],
+                       min_qty=d["min_qty"], direction=d["direction"])
+    text, kb = await _list_view(uid, market)
+    await message.answer("↩️ Повернув: " + _esc(d["skin_name"]) + "\n\n" + text,
+                         reply_markup=kb)
 
 
 @router.message(Command("menu"))
@@ -708,14 +763,53 @@ async def on_callback(cb: CallbackQuery, client, depth, market):
     action, _, sid = data.partition(":")
     uid = cb.from_user.id
 
+    # --- навігація (перемальовуємо на місці) ---
     if action == "menu":
-        await cb.message.answer(_menu_text(), reply_markup=keyboards.menu_kb())
-        await cb.answer()
+        await _show(cb, _menu_text(), keyboards.menu_kb())
         return
     if action == "help":
-        await cb.message.answer(HELP, reply_markup=keyboards.menu_kb())
-        await cb.answer()
+        await _show(cb, HELP, keyboards.menu_kb())
         return
+    if action == "status":
+        await _show(cb, *await _status_view(market, client, depth))
+        return
+    if action == "top":
+        mode = sid.split(":")[0]
+        if mode not in ("cheap", "spread"):
+            mode = "cheap"
+        await _show(cb, *await _top_view(market, mode))
+        return
+    if action == "lst":
+        try:
+            page = int(sid)
+        except ValueError:
+            page = 0
+        await _show(cb, *await _list_view(uid, market, page))
+        return
+    if action == "srt":
+        if sid in ("state", "price", "name"):
+            _sort_mode[uid] = sid
+        await _show(cb, *await _list_view(uid, market), toast=f"сорт: {sid}")
+        return
+    if action == "allmut":
+        n = await db.mute_all(uid, True)
+        await _show(cb, *await _list_view(uid, market), toast=f"стишено: {n}")
+        return
+    if action == "clrdone":
+        n = await db.remove_triggered(uid)
+        await _show(cb, *await _list_view(uid, market), toast=f"прибрано: {n}")
+        return
+    if action == "undo":
+        d = _last_deleted.pop(uid, None)
+        if d:
+            await db.add_watch(uid, cb.message.chat.id, d["skin_name"],
+                               d["target_price"], min_qty=d["min_qty"],
+                               direction=d["direction"])
+        await _show(cb, *await _list_view(uid, market),
+                    toast="↩️ повернуто" if d else "нема що повертати")
+        return
+
+    # --- підказки (нове повідомлення, тут edit недоречний) ---
     if action == "add":
         await cb.message.answer(_ADD_PROMPT, reply_markup=keyboards.add_kb())
         await cb.answer()
@@ -729,89 +823,18 @@ async def on_callback(cb: CallbackQuery, client, depth, market):
         await cb.message.answer("Напиши назву скіна — покажу ціни на всіх ринках.")
         await cb.answer()
         return
-    if action == "status":
-        text, kb = await _status_view(market, client, depth)
-        await cb.message.answer(text, reply_markup=kb)
-        await cb.answer()
-        return
-    if action == "top":
-        parts = sid.split(":")
-        mode = parts[0] if parts and parts[0] in ("cheap", "spread") else "cheap"
-        text, kb = await _top_view(market, mode)
-        await cb.message.answer(text, reply_markup=kb)
-        await cb.answer()
-        return
-    if action == "srt":
-        if sid in ("state", "price", "name"):
-            _sort_mode[uid] = sid
-        text, kb = await _list_view(uid, market)
-        try:
-            await cb.message.edit_text(text, reply_markup=kb)
-        except Exception:
-            await cb.message.answer(text, reply_markup=kb)
-        await cb.answer(f"сортування: {sid}")
-        return
-    if action == "allmut":
-        n = await db.mute_all(uid, True)
-        text, kb = await _list_view(uid, market)
-        try:
-            await cb.message.edit_text(text, reply_markup=kb)
-        except Exception:
-            await cb.message.answer(text, reply_markup=kb)
-        await cb.answer(f"стишено: {n}")
-        return
-    if action == "clrdone":
-        n = await db.remove_triggered(uid)
-        text, kb = await _list_view(uid, market)
-        try:
-            await cb.message.edit_text(text, reply_markup=kb)
-        except Exception:
-            await cb.message.answer(text, reply_markup=kb)
-        await cb.answer(f"прибрано: {n}")
-        return
-    if action == "snz":
-        parts = sid.split(":")
-        try:
-            wid = int(parts[0])
-        except (ValueError, IndexError):
-            await cb.answer()
-            return
-        if len(parts) == 1:  # показати підменю
-            await cb.message.answer(f"Тиша для #{wid}:", reply_markup=keyboards.snooze_kb(wid))
-            await cb.answer()
-            return
-        mins = int(parts[1])
-        await db.snooze(uid, wid, mins)
-        text, kb = await _watch_card(uid, wid, market)
-        await cb.message.answer(text, reply_markup=kb)
-        await cb.answer(f"тиша {mins // 60} год" if mins >= 60 else f"тиша {mins} хв")
-        return
-    if action == "lst":
-        try:
-            page = int(sid)
-        except ValueError:
-            page = 0
-        text, kb = await _list_view(uid, market, page)
-        try:
-            await cb.message.edit_text(text, reply_markup=kb)
-        except Exception:
-            await cb.message.answer(text, reply_markup=kb)
-        await cb.answer()
-        return
     if action == "pk":
         try:
-            idx = int(sid)
-            name = _last_search.get(uid, [])[idx]
+            name = _last_search.get(uid, [])[int(sid)]
         except (ValueError, IndexError):
             await cb.answer("застаріло, повтори пошук")
             return
         _pending_price[uid] = name
         await cb.message.answer(
             f"«{_esc(name)}»\nТепер напиши ціль у $ — напр. <code>0.13</code>\n"
-            "(або <code>0.13 x200</code>, щоб чекати опт)")
+            "(або <code>0.13 x200</code> опт, <code>0.20 вгору</code> на зростання)")
         await cb.answer()
         return
-
     if action == "qa":
         try:
             wanted = keyboards.QUICK_ADD[int(sid)]
@@ -826,8 +849,32 @@ async def on_callback(cb: CallbackQuery, client, depth, market):
         _pending_price[uid] = canonical
         await cb.message.answer(
             f"«{_esc(canonical)}»\nТепер напиши ціль у $ — напр. <code>0.13</code>\n"
-            "(або <code>0.13 x200</code>, щоб чекати опт)")
+            "(або <code>0.13 x200</code> опт, <code>0.20 вгору</code> на зростання)")
         await cb.answer()
+        return
+
+    # --- дії над стеженням #wid ---
+    if action == "snz":
+        parts = sid.split(":")
+        try:
+            wid = int(parts[0])
+        except (ValueError, IndexError):
+            await cb.answer()
+            return
+        if len(parts) == 1:
+            await _show(cb, f"Тиша для #{wid}:", keyboards.snooze_kb(wid))
+            return
+        mins = int(parts[1])
+        await db.snooze(uid, wid, mins)
+        toast = f"тиша {mins // 60} год" if mins >= 60 else f"тиша {mins} хв"
+        await _show(cb, *await _watch_card(uid, wid, market), toast=toast)
+        return
+    if action == "ok":
+        try:
+            await cb.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await cb.answer("ок")
         return
 
     try:
@@ -837,23 +884,17 @@ async def on_callback(cb: CallbackQuery, client, depth, market):
         return
 
     if action == "w":
-        text, kb = await _watch_card(uid, wid, market)
-        await cb.message.answer(text, reply_markup=kb)
-        await cb.answer()
+        await _show(cb, *await _watch_card(uid, wid, market))
         return
     if action == "dep":
-        text, kb = await _depth_view(uid, wid, client, depth, market)
-        await cb.message.answer(text, reply_markup=kb)
-        await cb.answer()
+        await _show(cb, *await _depth_view(uid, wid, client, depth, market))
         return
     if action == "cmp":
         w = await db.get_watch(uid, wid)
         if w is None:
             await cb.answer("нема такого")
             return
-        text, kb = await _compare_view(w["skin_name"], market)
-        await cb.message.answer(text, reply_markup=kb)
-        await cb.answer()
+        await _show(cb, *await _compare_view(w["skin_name"], market))
         return
     if action == "ed":
         w = await db.get_watch(uid, wid)
@@ -864,27 +905,24 @@ async def on_callback(cb: CallbackQuery, client, depth, market):
         await cb.message.answer(
             f"<b>#{wid} · {_esc(w['skin_name'])}</b>\n"
             "Надішли нову ціль у $ — напр. <code>0.13</code>\n"
-            "(або <code>0.13 x200</code> для стеження за обсягом)")
+            "(або <code>0.13 x200</code>, <code>0.20 вгору</code>)")
         await cb.answer()
         return
-
     if action == "del":
+        w = await db.get_watch(uid, wid)
+        if w is not None:
+            _last_deleted[uid] = {
+                "skin_name": w["skin_name"], "target_price": w["target_price"],
+                "min_qty": w["min_qty"], "direction": w["direction"],
+            }
         ok = await db.remove_watch(uid, wid)
-        text, kb = await _list_view(uid, market)
-        try:
-            await cb.message.edit_text(text, reply_markup=kb)
-        except Exception:
-            await cb.message.answer(text, reply_markup=kb)
-        await cb.answer(f"#{wid} прибрано" if ok else "нема такого")
+        await _show(cb, *await _list_view(uid, market),
+                    toast=f"#{wid} прибрано" if ok else "нема такого")
         return
     if action in ("mut", "unm"):
         await db.set_muted(uid, wid, action == "mut")
-        text, kb = await _watch_card(uid, wid, market)
-        try:
-            await cb.message.edit_text(text, reply_markup=kb)
-        except Exception:
-            await cb.message.answer(text, reply_markup=kb)
-        await cb.answer("стишено" if action == "mut" else "увімкнено")
+        await _show(cb, *await _watch_card(uid, wid, market),
+                    toast="стишено" if action == "mut" else "увімкнено")
         return
 
     await cb.answer()

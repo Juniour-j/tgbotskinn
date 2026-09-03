@@ -22,12 +22,12 @@ def _n(x) -> str:
     return f"{int(x):,}".replace(",", " ")
 
 
-def _price_alert(name, target, direction, market):
+def _price_alert(wid, name, target, direction, market):
     qs = sorted(market.quotes(name), key=lambda t: t[2].price)
     best = qs[0] if qs else None
     sign = "≥" if direction == "up" else "≤"
     lines = [f"🔔 <b>Ціль досягнута</b>  ·  <b>{_esc(name)}</b>"]
-    kb = None
+    kb, one = None, ""
     if best is not None:
         _, lbl, q = best
         bo = f"  ·  скуп ${q.buy_order:.2f}" if q.buy_order else ""
@@ -36,9 +36,9 @@ def _price_alert(name, target, direction, market):
         if others:
             inner.append("інші: " + " · ".join(others))
         lines.append("<blockquote>" + "\n".join(inner) + "</blockquote>")
-        if q.url:
-            kb = keyboards.alert_kb(lbl, q.url)
-    return "\n".join(lines), kb
+        kb = keyboards.alert_kb(lbl, q.url, wid)
+        one = f"<b>#{wid} {_esc(name)}</b> — <b>${q.price:.2f}</b> {lbl} (ціль {sign} ${target:.2f})"
+    return "\n".join(lines), kb, one
 
 
 def _qty_alert(watch, name, qty, depth, market):
@@ -59,11 +59,14 @@ def _qty_alert(watch, name, qty, depth, market):
     lines = [f"🔔 <b>Обсяг зібрався</b>  ·  <b>{_esc(name)}</b>",
              "<blockquote>" + "\n".join(inner) + "</blockquote>"]
     q_lis = next((q for k, _, q in market.quotes(name) if k == "lis"), None)
-    kb = keyboards.alert_kb("lis-skins", q_lis.url) if q_lis and q_lis.url else None
-    return "\n".join(lines), kb
+    url = q_lis.url if q_lis else ""
+    kb = keyboards.alert_kb("lis-skins", url, watch["id"])
+    one = f"<b>#{watch['id']} {_esc(name)}</b> — {_n(qty)} шт по ≤ ${t:.2f} (треба {watch['min_qty']})"
+    return "\n".join(lines), kb, one
 
 
 async def _cycle(bot, client, depth, market):
+    fired: dict[int, list] = {}  # chat_id -> [(text, kb, one_liner)]
     for w in await db.all_watches():
         name = w["skin_name"]
         min_qty = w["min_qty"] or 1
@@ -78,12 +81,8 @@ async def _cycle(bot, client, depth, market):
             met = qty >= min_qty
             if met and not w["triggered"]:
                 if not muted:
-                    txt, kb = _qty_alert(w, name, qty, depth, market)
-                    try:
-                        await bot.send_message(w["chat_id"], txt, reply_markup=kb)
-                    except Exception:
-                        log.exception("send failed for watch %s", w["id"])
-                    await asyncio.sleep(0.05)
+                    fired.setdefault(w["chat_id"], []).append(
+                        _qty_alert(w, name, qty, depth, market))
                 await db.mark_triggered(w["id"], price, True)
             elif not met and w["triggered"]:
                 await db.mark_triggered(w["id"], price, False)
@@ -94,20 +93,26 @@ async def _cycle(bot, client, depth, market):
         decision = alerts.evaluate(w["target_price"], bool(w["triggered"]),
                                    price, w["direction"])
         if decision == "fire":
-            if muted:
-                await db.set_last_price(w["id"], price)
-                continue
-            txt, kb = _price_alert(name, w["target_price"], w["direction"], market)
-            try:
-                await bot.send_message(w["chat_id"], txt, reply_markup=kb)
-            except Exception:
-                log.exception("send failed for watch %s", w["id"])
+            if not muted:
+                fired.setdefault(w["chat_id"], []).append(
+                    _price_alert(w["id"], name, w["target_price"], w["direction"], market))
             await db.mark_triggered(w["id"], price, True)
-            await asyncio.sleep(0.05)
         elif decision == "rearm":
             await db.mark_triggered(w["id"], price, False)
         elif price is not None and price != w["last_price"]:
             await db.set_last_price(w["id"], price)
+
+    for chat_id, items in fired.items():
+        if len(items) == 1:
+            txt, kb, _ = items[0]
+        else:
+            body = "\n".join(f"▎{one}" for _, _, one in items)
+            txt, kb = f"🔔 <b>Спрацювало ({len(items)})</b>\n{body}", None
+        try:
+            await bot.send_message(chat_id, txt, reply_markup=kb)
+        except Exception:
+            log.exception("alert send failed for chat %s", chat_id)
+        await asyncio.sleep(0.05)
 
 
 async def run_poller(bot, client, depth, market, cfg):

@@ -42,6 +42,16 @@ class SteamPrices:
             follow_redirects=True,
         )
 
+    def cached(self, name: str):
+        """Синхронно: ціна з кешу або None (без запиту)."""
+        hit = self._cache.get(name)
+        if hit is None:
+            return None
+        ts, price = hit
+        if time.time() - ts < (_TTL if price is not None else _NEG_TTL):
+            return price
+        return None
+
     async def get(self, name: str):
         if not self.enabled or not name:
             return None

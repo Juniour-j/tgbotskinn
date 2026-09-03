@@ -4,6 +4,17 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.types import BotCommand
+
+_COMMANDS = [
+    BotCommand(command="list", description="Мої стеження"),
+    BotCommand(command="add", description="Додати стеження"),
+    BotCommand(command="top", description="Топ: найдешевші / розкид"),
+    BotCommand(command="compare", description="Порівняти ціни по ринках"),
+    BotCommand(command="status", description="Стан бота і джерел"),
+    BotCommand(command="undo", description="Повернути видалене"),
+    BotCommand(command="help", description="Довідка"),
+]
 
 from . import db
 from .access import AccessMiddleware
@@ -50,6 +61,10 @@ async def main():
         dp.callback_query.outer_middleware(mw)
         log.info("access limited to %d user(s)", len(cfg.allowed_user_ids))
     dp.include_router(router)
+    try:
+        await bot.set_my_commands(_COMMANDS)
+    except Exception:
+        log.warning("set_my_commands failed", exc_info=True)
 
     tasks = [
         asyncio.create_task(run_poller(bot, client, depth, market, cfg)),

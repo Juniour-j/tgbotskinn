@@ -68,7 +68,7 @@ _SORT_LBL = {"state": "за станом", "price": "за ціною", "name": "
 
 
 def list_kb(page_rows, page: int, pages: int, sort: str,
-            has_triggered: bool) -> InlineKeyboardMarkup:
+            has_triggered: bool, undo: bool = False) -> InlineKeyboardMarkup:
     kb = []
     for r in page_rows:
         wid = r["id"]
@@ -76,6 +76,9 @@ def list_kb(page_rows, page: int, pages: int, sort: str,
             InlineKeyboardButton(text=f"📊 #{wid}", callback_data=f"dep:{wid}"),
             InlineKeyboardButton(text=f"⚙️ Керувати #{wid}", callback_data=f"w:{wid}"),
         ])
+    if undo:
+        kb.append([InlineKeyboardButton(text="↩️ Повернути видалене",
+                                        callback_data="undo")])
     if pages > 1:
         nav = []
         if page > 0:
@@ -168,7 +171,13 @@ def back_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[_LIST, _HOME]])
 
 
-def alert_kb(label: str, url: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text=f"🔗 Відкрити {label}", url=url),
-    ]])
+def alert_kb(label: str, url: str, wid: int) -> InlineKeyboardMarkup:
+    rows = []
+    if url:
+        rows.append([InlineKeyboardButton(text=f"🔗 Відкрити {label}", url=url)])
+    rows.append([
+        InlineKeyboardButton(text="🔕 1 год", callback_data=f"snz:{wid}:60"),
+        InlineKeyboardButton(text="🔕 8 год", callback_data=f"snz:{wid}:480"),
+        InlineKeyboardButton(text="✅ ок", callback_data=f"ok:{wid}"),
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
