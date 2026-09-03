@@ -2,6 +2,8 @@ import asyncio
 import logging
 
 from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 
 from . import db
 from .access import AccessMiddleware
@@ -34,7 +36,8 @@ async def main():
     if ext_sources:
         log.info("external markets: %s", ", ".join(s.key for s in ext_sources))
 
-    bot = Bot(cfg.telegram_token)
+    bot = Bot(cfg.telegram_token,
+              default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
     dp["client"] = client
     dp["depth"] = depth

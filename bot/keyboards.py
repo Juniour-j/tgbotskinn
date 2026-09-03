@@ -75,11 +75,11 @@ def list_kb(rows) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
-def watch_kb(wid: int, muted: bool, buy_url: str | None = None) -> InlineKeyboardMarkup:
-    """Картка керування одним стеженням."""
+def watch_kb(wid: int, muted: bool, open_links=None) -> InlineKeyboardMarkup:
+    """Картка керування одним стеженням. open_links: [(label, url), ...]."""
     kb = []
-    if buy_url:
-        kb.append([InlineKeyboardButton(text="🛒 Купити (найдешевше)", url=buy_url)])
+    for label, url in (open_links or [])[:2]:
+        kb.append([InlineKeyboardButton(text=f"🔗 Відкрити {label}", url=url)])
     kb.append([
         InlineKeyboardButton(text="📊 Глибина", callback_data=f"dep:{wid}"),
         InlineKeyboardButton(text="🔀 Порівняти", callback_data=f"cmp:{wid}"),
@@ -123,3 +123,9 @@ def find_kb(names) -> InlineKeyboardMarkup:
 
 def back_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[_LIST, _HOME]])
+
+
+def alert_kb(label: str, url: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=f"🔗 Відкрити {label}", url=url),
+    ]])

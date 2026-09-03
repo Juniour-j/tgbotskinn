@@ -6,57 +6,61 @@
 Глибина (x<шт>, /depth) — лише lis-skins.
 """
 import asyncio
+import html
 import logging
 
-from . import alerts, db
+from . import alerts, db, keyboards
 
 log = logging.getLogger("poller")
 
 
-def _ladder_str(depth, name: str, limit: int = 6) -> str:
-    rungs = depth.ladder(name, limit, from_price=depth.site_price(name))
-    return " · ".join(f"${p:.2f}×{q}" for p, q in rungs)
+def _esc(s) -> str:
+    return html.escape(str(s))
 
 
-def _fmt_price_alert(name, target, market) -> str:
-    qs = market.quotes(name)
-    best = min(qs, key=lambda t: t[2].price) if qs else None
-    lines = ["Ціна досягнута", name, f"ціль: <= ${target:.2f}"]
+def _n(x) -> str:
+    return f"{int(x):,}".replace(",", " ")
+
+
+def _price_alert(name, target, market):
+    qs = sorted(market.quotes(name), key=lambda t: t[2].price)
+    best = qs[0] if qs else None
+    lines = [f"🔔 <b>Ціль досягнута</b>", f"<b>{_esc(name)}</b>", ""]
+    kb = None
     if best is not None:
         _, lbl, q = best
-        lines.append(f"{lbl}: ${q.price:.2f}" + (f" ({q.qty} шт)" if q.qty else ""))
-        others = [f"{l} ${x.price:.2f}" for k, l, x in qs if (k, l) != (best[0], lbl)]
+        lines.append(f"<b>${q.price:.2f}</b> на {lbl}   (ціль ≤ ${target:.2f})")
+        others = [f"{l} ${x.price:.2f}" for _, l, x in qs[1:]]
         if others:
-            lines.append("ще: " + " · ".join(others))
+            lines.append("інші: " + " · ".join(others))
         if q.url:
-            lines.append(q.url)
-    return "\n".join(lines)
+            kb = keyboards.alert_kb(lbl, q.url)
+    return "\n".join(lines), kb
 
 
-def _fmt_qty_alert(watch, name, qty, depth, market) -> str:
+def _qty_alert(watch, name, qty, depth, market):
+    t = watch["target_price"]
     lines = [
-        "Обсяг зібрався",
-        name,
-        f"ціль: <= ${watch['target_price']:.2f}, треба >= {watch['min_qty']} шт",
-        f"зараз: {qty} шт <= ${watch['target_price']:.2f} (lis-skins)",
+        "🔔 <b>Обсяг зібрався</b>",
+        f"<b>{_esc(name)}</b>",
+        "",
+        f"можна купити <b>{_n(qty)} шт</b> по ≤ ${t:.2f}  (треба {watch['min_qty']})",
     ]
     sp = depth.site_price(name)
     fp = depth.fill_price(name, watch["min_qty"])
+    parts = []
     if sp is not None:
-        s = f"ціна на сайті: ${sp:.2f}"
-        if fp is not None and fp > sp:
-            s += f" · {watch['min_qty']} шт від ${fp:.2f}"
-        lines.append(s)
-    lad = _ladder_str(depth, name)
-    if lad:
-        lines.append(f"драбина: {lad}")
+        parts.append(f"lis-skins ${sp:.2f}")
+    if fp is not None:
+        parts.append(f"набрати {watch['min_qty']} від ${fp:.2f}")
+    if parts:
+        lines.append("  ·  ".join(parts))
     other = [f"{l} ${q.price:.2f}" for k, l, q in market.quotes(name) if k != "lis"]
     if other:
         lines.append("інші ринки: " + " · ".join(other))
-    age = depth.age_min()
-    if age >= 0:
-        lines.append(f"(глибина оновлена {age} хв тому)")
-    return "\n".join(lines)
+    q_lis = next((q for k, _, q in market.quotes(name) if k == "lis"), None)
+    kb = keyboards.alert_kb("lis-skins", q_lis.url) if q_lis and q_lis.url else None
+    return "\n".join(lines), kb
 
 
 async def _cycle(bot, client, depth, market):
@@ -73,9 +77,9 @@ async def _cycle(bot, client, depth, market):
             met = qty >= min_qty
             if met and not w["triggered"]:
                 if not w["muted"]:
+                    txt, kb = _qty_alert(w, name, qty, depth, market)
                     try:
-                        await bot.send_message(
-                            w["chat_id"], _fmt_qty_alert(w, name, qty, depth, market))
+                        await bot.send_message(w["chat_id"], txt, reply_markup=kb)
                     except Exception:
                         log.exception("send failed for watch %s", w["id"])
                     await asyncio.sleep(0.05)
@@ -91,9 +95,9 @@ async def _cycle(bot, client, depth, market):
             if w["muted"]:
                 await db.set_last_price(w["id"], price)
                 continue
+            txt, kb = _price_alert(name, w["target_price"], market)
             try:
-                await bot.send_message(
-                    w["chat_id"], _fmt_price_alert(name, w["target_price"], market))
+                await bot.send_message(w["chat_id"], txt, reply_markup=kb)
             except Exception:
                 log.exception("send failed for watch %s", w["id"])
             await db.mark_triggered(w["id"], price, True)

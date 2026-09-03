@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import re
 
@@ -15,30 +16,30 @@ log = logging.getLogger("handlers")
 router = Router()
 
 HELP = (
-    "Я слідкую за цінами скінів CS2 і пишу тобі, коли ціна впаде до потрібної.\n\n"
-    "Порівнюю 3 ринки: lis-skins, market.csgo, Skinport — беру найдешевший.\n\n"
-    "── Як додати стеження ──\n"
-    "Напиши одним рядком назву скіна і ціль у доларах:\n"
-    "  Kilowatt Case 0.13\n"
-    "  AWP | Asiimov (Field-Tested) 55\n"
+    "<b>Що я вмію</b>\n"
+    "Слідкую за цінами скінів CS2 і пишу, коли ціна впаде до потрібної.\n"
+    "Порівнюю 3 ринки — <b>lis-skins</b>, <b>market.csgo</b>, <b>Skinport</b> — і беру найдешевший.\n\n"
+    "<b>Як додати</b>\n"
+    "Напиши одним рядком назву й ціль у $:\n"
+    "<code>Kilowatt Case 0.13</code>\n"
+    "<code>AWP | Asiimov (Field-Tested) 55</code>\n"
     "→ сповіщу, щойно будь-де стане ≤ цієї ціни.\n\n"
-    "Додай x<кількість>, щоб чекати ОПТ:\n"
-    "  Kilowatt Case 0.13 x200\n"
-    "→ сповіщу, коли на lis-skins можна купити 200+ штук по ≤ $0.13.\n\n"
-    "Не знаєш точну назву — напиши частину («kilowatt»), покажу варіанти.\n"
-    "Або тисни ➕ Додати й обери популярний кейс кнопкою.\n\n"
-    "У списку під кожним стеженням: 📊 Глибина та ⚙️ Керувати "
-    "(там: 🛒 купити, ✏️ змінити ціль, 🔀 порівняти, 🔕 звук, 🗑 видалити)."
+    "<b>Стеження за обсягом</b> — додай <code>x&lt;кількість&gt;</code>:\n"
+    "<code>Kilowatt Case 0.13 x200</code>\n"
+    "→ сповіщу, коли на lis-skins можна <b>купити</b> 200+ шт по ≤ $0.13.\n\n"
+    "Не знаєш точну назву — напиши частину («kilowatt»), покажу варіанти кнопками.\n\n"
+    "У списку під кожним стеженням: <b>📊 Глибина</b> і <b>⚙️ Керувати</b>\n"
+    "(там: 🔗 відкрити, ✏️ змінити ціль, 🔀 порівняти, 🔕 звук, 🗑 видалити)."
 )
 
 _ADD_PROMPT = (
-    "Напиши назву скіна і ціль у $ одним рядком:\n\n"
-    "  Kilowatt Case 0.13\n"
-    "     → сповіщу, коли ціна впаде до $0.13\n\n"
-    "  Kilowatt Case 0.13 x200\n"
-    "     → сповіщу, коли можна купити 200+ шт по ≤ $0.13\n\n"
+    "<b>Напиши назву скіна і ціль у $</b> одним рядком:\n\n"
+    "<code>Kilowatt Case 0.13</code>\n"
+    "   → сповіщу, коли ціна впаде до $0.13\n\n"
+    "<code>Kilowatt Case 0.13 x200</code>\n"
+    "   → сповіщу, коли можна купити 200+ шт по ≤ $0.13\n\n"
     "Не знаєш точну назву — напиши частину, покажу варіанти.\n"
-    "Або обери популярний кейс кнопкою нижче ⬇️"
+    "Або обери популярний кейс кнопкою ⬇️"
 )
 
 _QTY_RE = re.compile(r"^[xхXХ*](\d+)$")
@@ -88,98 +89,140 @@ def _parse_price_qty(s: str):
 
 def _menu_text() -> str:
     return (
-        "Що зробити?\n\n"
-        "📋 Мої стеження — список + керування\n"
-        "➕ Додати — нове стеження за ціною\n"
-        "🔀 Порівняти ціни — по всіх ринках для одного скіна\n"
-        "🔎 Знайти скін — пошук за назвою\n"
-        "❓ Довідка — як це працює"
+        "<b>Меню</b>\n\n"
+        "📋 <b>Мої стеження</b> — список + керування\n"
+        "➕ <b>Додати</b> — нове стеження за ціною\n"
+        "🔀 <b>Порівняти ціни</b> — по всіх ринках для одного скіна\n"
+        "🔎 <b>Знайти скін</b> — пошук за назвою\n"
+        "❓ <b>Довідка</b> — як це працює"
     )
 
 
 _SHORT = {"lis-skins": "lis", "market.csgo": "mcsgo", "skinport": "sp"}
 
 
+def _esc(s) -> str:
+    return html.escape(str(s))
+
+
+def _n(x) -> str:
+    return f"{int(x):,}".replace(",", " ")
+
+
 def _mkt_line(name: str, market, short: bool = False) -> str:
     qs = sorted(market.quotes(name), key=lambda t: t[2].price)
-    return " · ".join(
-        f"{(_SHORT.get(lbl, lbl) if short else lbl)} ${q.price:.2f}"
+    return "  ·  ".join(
+        f"{(_SHORT.get(lbl, lbl) if short else lbl)} <b>${q.price:.2f}</b>"
         for _, lbl, q in qs
     )
 
 
-def _flag(row, met: bool) -> str:
+def _state(row, met: bool) -> str:
     if row["muted"]:
-        return "🔕"
+        return "🔕 без звуку"
     if met:
-        return "✅" + ("·сповіщено" if row["triggered"] else "")
-    return "⏳"
+        return "✅ ціль досягнута" + (" · сповіщено" if row["triggered"] else "")
+    return "⏳ чекаю"
+
+
+def _icon(row, met: bool) -> str:
+    return "🔕" if row["muted"] else ("✅" if met else "⏳")
 
 
 async def _list_view(user_id: int, market):
     rows = await db.list_watches(user_id)
     if not rows:
-        return ("Ще нема жодного стеження.\n\n"
+        return ("<b>Ще нема жодного стеження.</b>\n\n"
                 "Тисни ➕ Додати або просто напиши «назва ціна»:\n"
-                "   Kilowatt Case 0.13"), keyboards.add_kb()
+                "<code>Kilowatt Case 0.13</code>"), keyboards.add_kb()
     depth = market.depth
+    done = 0
     blocks = []
     for r in rows:
-        name = r["skin_name"]
+        name = _esc(r["skin_name"])
         t = r["target_price"]
-        mkt = _mkt_line(name, market, short=True) or "ціни нема"
+        mkt = _mkt_line(r["skin_name"], market, short=True) or "ціни ще нема"
         if r["min_qty"] > 1:
-            have = depth.buyable_qty(name, t)
+            have = depth.buyable_qty(r["skin_name"], t)
             met = have is not None and have >= r["min_qty"]
-            fp = depth.fill_price(name, r["min_qty"])
-            now = f"{have} шт" if have is not None else "…"
-            extra = f" · набрати {r['min_qty']} від ${fp:.2f}" if fp else ""
+            fp = depth.fill_price(r["skin_name"], r["min_qty"])
+            now = f"{_n(have)} шт" if have is not None else "…"
+            extra = f"\nнабрати {r['min_qty']} шт: від <b>${fp:.2f}</b>" if fp else ""
             blocks.append(
-                f"#{r['id']} {name} · опт ≥{r['min_qty']}  {_flag(r, met)}\n"
-                f"   ≤ ${t:.2f} · зараз {now}{extra}\n"
-                f"   {mkt}"
+                f"{_icon(r, met)} <b>#{r['id']} {name}</b> · опт ≥{r['min_qty']}\n"
+                f"ціль ≤ ${t:.2f} · зараз {now} по ≤ ${t:.2f}{extra}\n"
+                f"{mkt}"
             )
         else:
-            best = market.best(name)
+            best = market.best(r["skin_name"])
             met = best is not None and best[2].price <= t
-            now = (f"${best[2].price:.2f} {_SHORT.get(best[1], best[1])}"
-                   if best else "?")
+            if best is not None:
+                gap = best[2].price - t
+                tail = ("вже нижче цілі" if gap <= 0
+                        else f"ще −${gap:.2f} до цілі")
+                now = f"<b>${best[2].price:.2f}</b> ({_SHORT.get(best[1], best[1])}) · {tail}"
+            else:
+                now = "?"
             blocks.append(
-                f"#{r['id']} {name}  {_flag(r, met)}\n"
-                f"   ≤ ${t:.2f} · зараз {now}\n"
-                f"   {mkt}"
+                f"{_icon(r, met)} <b>#{r['id']} {name}</b>\n"
+                f"ціль ≤ ${t:.2f} · зараз {now}\n"
+                f"{mkt}"
             )
-    return "\n\n".join(blocks), keyboards.list_kb(rows)
+        if met and not r["muted"]:
+            done += 1
+    hdr = f"<b>📋 Стеження: {len(rows)}</b>"
+    if done:
+        hdr += f"  ·  ✅ {done}"
+    return hdr + "\n\n" + "\n\n".join(blocks), keyboards.list_kb(rows)
+
+
+def _open_links(name: str, market):
+    out = []
+    for _, lbl, q in sorted(market.quotes(name), key=lambda t: t[2].price):
+        if q.url:
+            out.append((lbl, q.url))
+    return out
 
 
 async def _watch_card(user_id: int, wid: int, market):
     w = await db.get_watch(user_id, wid)
     if w is None:
         return f"Немає стеження #{wid}.", keyboards.back_kb()
-    name = w["skin_name"]
-    t = w["target_price"]
-    depth = market.depth
+    name, t, depth = w["skin_name"], w["target_price"], market.depth
     best = market.best(name)
-    buy_url = best[2].url if best else None
-    lines = [f"#{wid} · {name}"]
+    lines = [f"<b>#{wid} · {_esc(name)}</b>", ""]
     if w["min_qty"] > 1:
         have = depth.buyable_qty(name, t)
         met = have is not None and have >= w["min_qty"]
-        lines.append(f"Умова: ≥ {w['min_qty']} шт по ≤ ${t:.2f} (lis-skins)  {_flag(w, met)}")
+        lines.append(f"Ціль:  ≥ {w['min_qty']} шт по ≤ <b>${t:.2f}</b>  (lis-skins)")
+        lines.append(f"Стан:  {_state(w, met)}")
         if have is not None:
-            lines.append(f"Зараз: {have} шт по ≤ ${t:.2f}")
+            lines.append(f"Зараз: {_n(have)} шт по ≤ ${t:.2f}")
         fp = depth.fill_price(name, w["min_qty"])
         if fp is not None:
-            lines.append(f"Набрати {w['min_qty']} шт зараз: від ${fp:.2f}")
+            lines.append(f"Набрати {w['min_qty']} шт: від <b>${fp:.2f}</b>")
     else:
         met = best is not None and best[2].price <= t
-        lines.append(f"Ціль: ≤ ${t:.2f}  {_flag(w, met)}")
+        lines.append(f"Ціль:  ≤ <b>${t:.2f}</b>")
+        lines.append(f"Стан:  {_state(w, met)}")
         if best is not None:
-            lines.append(f"Зараз найдешевше: ${best[2].price:.2f} ({best[1]})")
-    mkt = _mkt_line(name, market)
-    if mkt:
-        lines.append("Ринки: " + mkt)
-    return "\n".join(lines), keyboards.watch_kb(wid, bool(w["muted"]), buy_url)
+            gap = best[2].price - t
+            note = "" if gap <= 0 else f"  (ще −${gap:.2f})"
+            lines.append(f"Зараз: <b>${best[2].price:.2f}</b> — {best[1]}{note}")
+    qs = sorted(market.quotes(name), key=lambda x: x[2].price)
+    if qs:
+        lines.append("")
+        lines.append("Ціни по ринках:")
+        rows = [f"{'▸ ' if i == 0 else '  '}{lbl:<12}{'$' + format(q.price, '.2f'):>8}"
+                for i, (_, lbl, q) in enumerate(qs)]
+        lines.append("<pre>" + _esc("\n".join(rows)) + "</pre>")
+    return ("\n".join(lines),
+            keyboards.watch_kb(wid, bool(w["muted"]), _open_links(name, market)))
+
+
+def _bar(q: int, mx: int, width: int = 10) -> str:
+    filled = round(q / mx * width) if mx else 0
+    return "█" * filled + "░" * (width - filled)
 
 
 async def _depth_view(user_id: int, wid: int, client, depth, market):
@@ -189,43 +232,49 @@ async def _depth_view(user_id: int, wid: int, client, depth, market):
     name = w["skin_name"]
     if not depth.has(name):
         asyncio.create_task(_kick_depth(depth))
-        return (f"Глибина для «{name}» ще не завантажена.\n"
+        return ("<b>Глибина ще вантажиться</b>\n"
                 "Оновлюється раз на ~10 хв. Спробуй за хвилину."), keyboards.depth_kb(wid)
     sp = depth.site_price(name)
     rungs = depth.ladder(name, 12, from_price=sp)
-    out = [name]
+    mx = max((q for _, q in rungs), default=1)
+    out = [f"<b>📊 {_esc(name)}</b> · lis-skins"]
     if sp is not None:
-        out.append(f"lis-skins: ${sp:.2f}   (глибина {depth.age_min()} хв тому)")
-    out += ["", "ціна    шт     сумарно"]
+        out.append(f"ціна на сайті <b>${sp:.2f}</b> · оновлено {depth.age_min()} хв тому")
+    body = [f"{'ціна':<7}{'шт':>8}   {'сумарно':>9}"]
     cum = 0
     for p, q in rungs:
         cum += q
-        out.append(f"${p:<6.2f} {q:<6} {cum}")
+        body.append(f"${p:<6.2f}{_n(q):>8}   {_n(cum):>9}  {_bar(q, mx)}")
+    out.append("<pre>" + _esc("\n".join(body)) + "</pre>")
     q_want = w["min_qty"] if w["min_qty"] > 1 else 50
     fill = depth.fill_price(name, q_want)
     have = depth.buyable_qty(name, w["target_price"])
-    out.append("")
     if fill is not None:
-        out.append(f"{q_want} шт набрати від: ${fill:.2f}")
-    out.append(f"по <= ${w['target_price']:.2f}: {have} шт (ціль x{w['min_qty']})")
+        out.append(f"набрати {q_want} шт: від <b>${fill:.2f}</b>")
+    tick = " ✅" if (have is not None and w["min_qty"] > 1 and have >= w["min_qty"]) else ""
+    out.append(f"по ≤ ${w['target_price']:.2f}: <b>{_n(have or 0)} шт</b>"
+               + (f" (ціль x{w['min_qty']}{tick})" if w["min_qty"] > 1 else ""))
     other = [(lbl, q) for k, lbl, q in market.quotes(name) if k != "lis"]
     if other:
         out.append("")
-        out.append("--- інші ринки ---")
-        for lbl, q in other:
-            out.append(f"{lbl:<14} ${q.price:.2f}" + (f"  ({q.qty})" if q.qty else ""))
+        out.append("інші ринки: " + "  ·  ".join(
+            f"{lbl} <b>${q.price:.2f}</b>" for lbl, q in other))
     return "\n".join(out), keyboards.depth_kb(wid)
 
 
 async def _compare_view(name: str, market):
     qs = sorted(market.quotes(name), key=lambda t: t[2].price)
     if not qs:
-        return f"{name}\n\nЦіни ніде не знайшов.", keyboards.back_kb()
-    out = [name, "ціни зараз (найдешевше зверху):", ""]
-    for i, (_, lbl, q) in enumerate(qs):
-        mark = " ←" if i == 0 else ""
-        extra = f"   {q.qty} шт" if q.qty else ""
-        out.append(f"{lbl:<12} ${q.price:.2f}{extra}{mark}")
+        return f"<b>{_esc(name)}</b>\n\nЦіни ніде не знайшов.", keyboards.back_kb()
+    rows = [f"{'▸ ' if i == 0 else '  '}{lbl:<12}{'$' + format(q.price, '.2f'):>8}"
+            + (f"   {_n(q.qty)} шт" if q.qty else "")
+            for i, (_, lbl, q) in enumerate(qs)]
+    out = [f"<b>🔀 {_esc(name)}</b>", "ціни зараз:", "",
+           "<pre>" + _esc("\n".join(rows)) + "</pre>"]
+    if len(qs) > 1:
+        lo, hi = qs[0][2].price, qs[-1][2].price
+        pct = (hi - lo) / hi * 100 if hi else 0
+        out.append(f"розкид ${hi - lo:.2f} — найдешевше на {pct:.0f}% нижче за найдорожче")
     return "\n".join(out), keyboards.back_kb()
 
 
@@ -237,47 +286,49 @@ async def _add_watch(uid: int, chat_id: int, raw_name: str, price: float,
                 if s > matcher.MIN_SUGGEST]
         _last_search[uid] = sugg
         if sugg:
-            return (f"«{raw_name}» — не впевнений. Вибери:", keyboards.find_kb(sugg))
-        return (f"Не знайшов «{raw_name}». Напиши інакше.", keyboards.menu_kb())
+            return (f"«{_esc(raw_name)}» — не впевнений. Вибери:", keyboards.find_kb(sugg))
+        return (f"Не знайшов «{_esc(raw_name)}». Напиши інакше.", keyboards.menu_kb())
 
     wid, action = await db.add_watch(uid, chat_id, canonical, price, min_qty=qty)
     if wid is None:
         return "Не вдалося зберегти. Спробуй ще раз.", keyboards.menu_kb()
 
-    head = "✅ Стежу" if action == "created" else "✏️ Оновив стеження"
-    lines = [f"{head} #{wid} — {canonical}"]
+    head = "✅ <b>Стежу</b>" if action == "created" else "✏️ <b>Оновив стеження</b>"
+    lines = [f"{head} #{wid}", f"<b>{_esc(canonical)}</b>"]
     if not exact:
-        lines.append("(назву підібрав за схожістю)")
+        lines.append("<i>(назву підібрав за схожістю)</i>")
+    lines.append("")
 
     best = market.best(canonical)
     if qty > 1:
-        lines.append(f"Умова: можна купити ≥ {qty} шт по ≤ ${price:.2f} (lis-skins)")
+        lines.append(f"Ціль: ≥ {qty} шт по ≤ <b>${price:.2f}</b>  (lis-skins)")
         have = depth.buyable_qty(canonical, price)
         if have is None:
             lines.append("Зараз: глибина ще вантажиться (~хвилина).")
             asyncio.create_task(_kick_depth(depth))
         elif have >= qty:
-            lines.append(f"Зараз: {have} шт по ≤ ${price:.2f} — умова вже виконана ✅")
+            lines.append(f"Зараз: <b>{_n(have)} шт</b> по ≤ ${price:.2f} — умова вже виконана ✅")
         else:
             fp = depth.fill_price(canonical, qty)
-            lines.append(f"Зараз: лише {have} шт по ≤ ${price:.2f} (треба {qty}) — чекаю ⏳")
+            lines.append(f"Зараз: лише {_n(have)} шт по ≤ ${price:.2f} (треба {qty}) — чекаю ⏳")
             if fp is not None:
-                lines.append(f"Щоб набрати {qty} шт зараз — від ${fp:.2f}")
+                lines.append(f"Набрати {qty} шт зараз: від <b>${fp:.2f}</b>")
     else:
-        lines.append(f"Ціль: ≤ ${price:.2f}")
+        lines.append(f"Ціль: ціна ≤ <b>${price:.2f}</b>")
         if best is not None:
             _, lbl, q = best
             if q.price <= price:
-                lines.append(f"Зараз найдешевше ${q.price:.2f} ({lbl}) — вже ≤ цілі ✅")
-                lines.append("Сповіщу, якщо ціна підніметься і знову впаде.")
+                lines.append(f"Зараз: <b>${q.price:.2f}</b> ({lbl}) — вже ≤ цілі ✅")
+                lines.append("<i>Сповіщу, якщо підніметься і знову впаде.</i>")
             else:
-                lines.append(f"Зараз найдешевше ${q.price:.2f} ({lbl}) — чекаю падіння до ${price:.2f} ⏳")
+                lines.append(f"Зараз: <b>${q.price:.2f}</b> ({lbl}) — ще −${q.price - price:.2f} до цілі ⏳")
         else:
             lines.append("Ціна зʼявиться після наступного оновлення.")
             asyncio.create_task(_kick_depth(depth))
 
     mkt = _mkt_line(canonical, market)
     if mkt:
+        lines.append("")
         lines.append("Ринки: " + mkt)
     return "\n".join(lines), keyboards.after_add_kb(wid)
 
@@ -553,8 +604,8 @@ async def on_callback(cb: CallbackQuery, client, depth, market):
             return
         _pending_price[uid] = name
         await cb.message.answer(
-            f"«{name}»\nТепер напиши ціль у $ — напр. 0.13\n"
-            "(або 0.13 x200, щоб чекати опт)")
+            f"«{_esc(name)}»\nТепер напиши ціль у $ — напр. <code>0.13</code>\n"
+            "(або <code>0.13 x200</code>, щоб чекати опт)")
         await cb.answer()
         return
 
@@ -566,13 +617,13 @@ async def on_callback(cb: CallbackQuery, client, depth, market):
             return
         canonical, _ = matcher.resolve(wanted, client.names)
         if canonical is None:
-            await cb.message.answer(f"«{wanted}» зараз нема в каталозі lis-skins.")
+            await cb.message.answer(f"«{_esc(wanted)}» зараз нема в каталозі lis-skins.")
             await cb.answer()
             return
         _pending_price[uid] = canonical
         await cb.message.answer(
-            f"«{canonical}»\nТепер напиши ціль у $ — напр. 0.13\n"
-            "(або 0.13 x200, щоб чекати опт)")
+            f"«{_esc(canonical)}»\nТепер напиши ціль у $ — напр. <code>0.13</code>\n"
+            "(або <code>0.13 x200</code>, щоб чекати опт)")
         await cb.answer()
         return
 
@@ -608,8 +659,9 @@ async def on_callback(cb: CallbackQuery, client, depth, market):
             return
         _pending_edit[uid] = wid
         await cb.message.answer(
-            f"#{wid} · {w['skin_name']}\nНадішли нову ціль у $ — напр. 0.13\n"
-            "(або 0.13 x200 для стеження за обсягом)")
+            f"<b>#{wid} · {_esc(w['skin_name'])}</b>\n"
+            "Надішли нову ціль у $ — напр. <code>0.13</code>\n"
+            "(або <code>0.13 x200</code> для стеження за обсягом)")
         await cb.answer()
         return
 
