@@ -12,12 +12,14 @@ from aiogram.types import (
 MAIN_KB = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="➕ Додати"), KeyboardButton(text="📋 Список")],
-        [KeyboardButton(text="🔎 Пошук"), KeyboardButton(text="❓ Довідка")],
+        [KeyboardButton(text="🔎 Знайти"), KeyboardButton(text="🔀 Порівняти")],
     ],
     resize_keyboard=True,
+    is_persistent=True,
 )
 
-_HOME = InlineKeyboardButton(text="🏠 меню", callback_data="menu")
+_HOME = InlineKeyboardButton(text="🏠 Меню", callback_data="menu")
+_LIST = InlineKeyboardButton(text="📋 Список", callback_data="lst:0")
 
 # популярні кейси для швидкого додавання
 QUICK_ADD = (
@@ -32,6 +34,16 @@ QUICK_ADD = (
 )
 
 
+def menu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📋 Мої стеження", callback_data="lst:0")],
+        [InlineKeyboardButton(text="➕ Додати стеження", callback_data="add")],
+        [InlineKeyboardButton(text="🔀 Порівняти ціни", callback_data="cmpask"),
+         InlineKeyboardButton(text="🔎 Знайти скін", callback_data="find")],
+        [InlineKeyboardButton(text="❓ Довідка", callback_data="help")],
+    ])
+
+
 def add_kb() -> InlineKeyboardMarkup:
     kb, row = [], []
     for i, n in enumerate(QUICK_ADD):
@@ -42,33 +54,18 @@ def add_kb() -> InlineKeyboardMarkup:
             row = []
     if row:
         kb.append(row)
-    kb.append([InlineKeyboardButton(text="📋 Список", callback_data="lst:0"), _HOME])
+    kb.append([_LIST, _HOME])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
-def menu_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📋 Мої стеження", callback_data="lst:0")],
-        [InlineKeyboardButton(text="➕ Додати стеження", callback_data="add")],
-        [InlineKeyboardButton(text="🔎 Знайти скін", callback_data="find"),
-         InlineKeyboardButton(text="❓ Довідка", callback_data="help")],
-    ])
-
-
 def list_kb(rows) -> InlineKeyboardMarkup:
+    """Компактно: 2 кнопки на стеження (глибина + керувати)."""
     kb = []
-    for r in rows[:12]:
+    for r in rows[:20]:
         wid = r["id"]
-        mute_btn = (
-            InlineKeyboardButton(text=f"🔔 #{wid}", callback_data=f"unm:{wid}")
-            if r["muted"]
-            else InlineKeyboardButton(text=f"🔕 #{wid}", callback_data=f"mut:{wid}")
-        )
         kb.append([
-            InlineKeyboardButton(text=f"📊 #{wid}", callback_data=f"dep:{wid}"),
-            InlineKeyboardButton(text=f"🔀 #{wid}", callback_data=f"cmp:{wid}"),
-            mute_btn,
-            InlineKeyboardButton(text=f"🗑 #{wid}", callback_data=f"del:{wid}"),
+            InlineKeyboardButton(text=f"📊 Глибина #{wid}", callback_data=f"dep:{wid}"),
+            InlineKeyboardButton(text=f"⚙️ Керувати #{wid}", callback_data=f"w:{wid}"),
         ])
     kb.append([
         InlineKeyboardButton(text="➕ Додати", callback_data="add"),
@@ -78,21 +75,42 @@ def list_kb(rows) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
+def watch_kb(wid: int, muted: bool, buy_url: str | None = None) -> InlineKeyboardMarkup:
+    """Картка керування одним стеженням."""
+    kb = []
+    if buy_url:
+        kb.append([InlineKeyboardButton(text="🛒 Купити (найдешевше)", url=buy_url)])
+    kb.append([
+        InlineKeyboardButton(text="📊 Глибина", callback_data=f"dep:{wid}"),
+        InlineKeyboardButton(text="🔀 Порівняти", callback_data=f"cmp:{wid}"),
+    ])
+    mute = (("🔔 Увімкнути звук", f"unm:{wid}") if muted
+            else ("🔕 Без звуку", f"mut:{wid}"))
+    kb.append([
+        InlineKeyboardButton(text="✏️ Змінити ціль", callback_data=f"ed:{wid}"),
+        InlineKeyboardButton(text=mute[0], callback_data=mute[1]),
+    ])
+    kb.append([
+        InlineKeyboardButton(text="🗑 Видалити", callback_data=f"del:{wid}"),
+        _LIST,
+    ])
+    kb.append([_HOME])
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
 def depth_kb(wid: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔄 Оновити", callback_data=f"dep:{wid}"),
-         InlineKeyboardButton(text="🔀 Порівняти", callback_data=f"cmp:{wid}")],
-        [InlineKeyboardButton(text="📋 Список", callback_data="lst:0"), _HOME],
+         InlineKeyboardButton(text="⚙️ Керувати", callback_data=f"w:{wid}")],
+        [_LIST, _HOME],
     ])
 
 
 def after_add_kb(wid: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"📊 глибина #{wid}", callback_data=f"dep:{wid}"),
-         InlineKeyboardButton(text=f"🔀 порівняти #{wid}", callback_data=f"cmp:{wid}")],
-        [InlineKeyboardButton(text=f"🗑 прибрати #{wid}", callback_data=f"del:{wid}"),
-         InlineKeyboardButton(text="📋 Список", callback_data="lst:0")],
-        [_HOME],
+        [InlineKeyboardButton(text="📊 Глибина", callback_data=f"dep:{wid}"),
+         InlineKeyboardButton(text="⚙️ Керувати", callback_data=f"w:{wid}")],
+        [_LIST, _HOME],
     ])
 
 
@@ -104,6 +122,4 @@ def find_kb(names) -> InlineKeyboardMarkup:
 
 
 def back_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="📋 Список", callback_data="lst:0"), _HOME,
-    ]])
+    return InlineKeyboardMarkup(inline_keyboard=[[_LIST, _HOME]])

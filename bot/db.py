@@ -108,6 +108,16 @@ async def remove_watch(user_id: int, watch_id: int) -> bool:
     return cur.rowcount > 0
 
 
+async def set_target(user_id: int, watch_id: int, price: float, min_qty: int = 1) -> bool:
+    cur = await _db.execute(
+        "UPDATE watches SET target_price=?, min_qty=?, triggered=0 "
+        "WHERE user_id=? AND id=?",
+        (price, min_qty, user_id, watch_id),
+    )
+    await _db.commit()
+    return cur.rowcount > 0
+
+
 async def set_muted(user_id: int, watch_id: int, muted: bool) -> bool:
     cur = await _db.execute(
         "UPDATE watches SET muted=? WHERE user_id=? AND id=?",
