@@ -19,13 +19,39 @@ MAIN_KB = ReplyKeyboardMarkup(
 
 _HOME = InlineKeyboardButton(text="🏠 меню", callback_data="menu")
 
+# популярні кейси для швидкого додавання
+QUICK_ADD = (
+    "Kilowatt Case",
+    "Revolution Case",
+    "Fever Case",
+    "Gallery Case",
+    "Dreams & Nightmares Case",
+    "Recoil Case",
+    "Fracture Case",
+    "Snakebite Case",
+)
+
+
+def add_kb() -> InlineKeyboardMarkup:
+    kb, row = [], []
+    for i, n in enumerate(QUICK_ADD):
+        row.append(InlineKeyboardButton(
+            text="⚡ " + n.replace(" Case", ""), callback_data=f"qa:{i}"))
+        if len(row) == 2:
+            kb.append(row)
+            row = []
+    if row:
+        kb.append(row)
+    kb.append([InlineKeyboardButton(text="📋 Список", callback_data="lst:0"), _HOME])
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
 
 def menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📋 Мої стеження", callback_data="lst:0")],
-        [InlineKeyboardButton(text="➕ Додати", callback_data="add"),
-         InlineKeyboardButton(text="🔎 Знайти скін", callback_data="find")],
-        [InlineKeyboardButton(text="❓ Як користуватись", callback_data="help")],
+        [InlineKeyboardButton(text="➕ Додати стеження", callback_data="add")],
+        [InlineKeyboardButton(text="🔎 Знайти скін", callback_data="find"),
+         InlineKeyboardButton(text="❓ Довідка", callback_data="help")],
     ])
 
 
