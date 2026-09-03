@@ -10,6 +10,8 @@ load_dotenv()
 
 DEFAULT_EXPORT_URL = "https://lis-skins.com/market_export_json/csgo.json"
 DEFAULT_FULL_EXPORT_URL = "https://lis-skins.com/market_export_json/api_csgo_full.json"
+DEFAULT_MCSGO_URL = "https://market.csgo.com/api/v2/prices/USD.json"
+DEFAULT_SKINPORT_URL = "https://api.skinport.com/v1/items?app_id=730&currency=USD"
 
 
 def _parse_ids(raw: str) -> frozenset[int]:
@@ -22,6 +24,11 @@ def _parse_ids(raw: str) -> frozenset[int]:
     return frozenset(out)
 
 
+def _parse_sources(raw: str) -> tuple:
+    known = ("mcsgo", "skinport")
+    return tuple(s for s in raw.replace(",", " ").split() if s in known)
+
+
 @dataclass
 class Config:
     telegram_token: str
@@ -32,6 +39,9 @@ class Config:
     depth_refresh_min: int = 10
     http_timeout: float = 30.0
     allowed_user_ids: frozenset[int] = frozenset()
+    sources: tuple = ("mcsgo", "skinport")
+    mcsgo_url: str = DEFAULT_MCSGO_URL
+    skinport_url: str = DEFAULT_SKINPORT_URL
 
     @classmethod
     def load(cls) -> "Config":
@@ -47,4 +57,7 @@ class Config:
             depth_refresh_min=int(os.environ.get("DEPTH_REFRESH_MIN", "10")),
             http_timeout=float(os.environ.get("HTTP_TIMEOUT", "30")),
             allowed_user_ids=_parse_ids(os.environ.get("ALLOWED_USER_IDS", "")),
+            sources=_parse_sources(os.environ.get("SOURCES", "mcsgo,skinport")),
+            mcsgo_url=os.environ.get("MCSGO_URL", DEFAULT_MCSGO_URL),
+            skinport_url=os.environ.get("SKINPORT_URL", DEFAULT_SKINPORT_URL),
         )

@@ -15,13 +15,23 @@ log = logging.getLogger("handlers")
 router = Router()
 
 HELP = (
-    "Стежу за цінами скінів на lis-skins.com (CS2). Все через кнопки нижче.\n\n"
-    "Додати стеження — просто напиши:\n"
+    "Стежу за цінами скінів CS2 на кількох ринках (lis-skins, market.csgo, Skinport).\n\n"
+    "Додати стеження — напиши:\n"
     "  <назва> <ціна>            напр.  AWP | Asiimov (Field-Tested) 55\n"
-    "  <назва> <ціна> x<шт>      напр.  Sealed Dead Hand Terminal 0.44 x200\n"
-    "        (x<шт> — сповістити, коли можна КУПИТИ >= стільки лотів по <= ціна)\n\n"
+    "  <назва> <ціна> x<шт>      напр.  Kilowatt Case 0.13 x200\n"
+    "        (x<шт> — сповістити, коли на lis-skins можна КУПИТИ >= стільки по <= ціна)\n\n"
     "Не знаєш точну назву — напиши частину, покажу варіанти кнопками.\n\n"
-    "Ціна = як на сайті. Перевірка ~щохвилини, глибина — раз на ~10 хв."
+    "Ціна для звичайного стеження — найдешевша серед ринків. Глибина (x<шт>) — lis-skins."
+)
+
+_ADD_PROMPT = (
+    "Надішли одним рядком:\n"
+    "  <назва> <ціна>            або\n"
+    "  <назва> <ціна> x<шт>\n\n"
+    "Приклади:\n"
+    "  AWP | Asiimov (Field-Tested) 55\n"
+    "  Kilowatt Case 0.13 x200\n\n"
+    "Не знаєш точну назву — просто напиши частину."
 )
 
 _QTY_RE = re.compile(r"^[xхXХ*](\d+)$")
@@ -71,7 +81,12 @@ def _menu_text() -> str:
     return "Меню. Що робимо?"
 
 
-async def _list_view(user_id: int, client, depth):
+def _mkt_line(name: str, market) -> str:
+    qs = sorted(market.quotes(name), key=lambda t: t[2].price)
+    return " · ".join(f"{lbl} ${q.price:.2f}" for _, lbl, q in qs)
+
+
+async def _list_view(user_id: int, market):
     rows = await db.list_watches(user_id)
     if not rows:
         return "Порожньо — додай перше стеження.", keyboards.menu_kb()
@@ -79,30 +94,22 @@ async def _list_view(user_id: int, client, depth):
     for r in rows:
         state = " [muted]" if r["muted"] else (" [спрацював]" if r["triggered"] else "")
         name = r["skin_name"]
-        item = client.lookup(name)
-        sp = depth.site_price(name)
-        if sp is not None:
-            now = f"${sp:.2f}"
-        elif item is not None:
-            now = f"${item.price:.2f}~"
-        elif r["last_price"] is not None:
-            now = f"${r['last_price']:.2f}~"
-        else:
-            now = "?"
+        depth = market.depth
+        mkt = _mkt_line(name, market) or "?"
         if r["min_qty"] > 1:
             have = depth.buyable_qty(name, r["target_price"])
             have_s = f"{have} шт" if have is not None else "?"
             fp = depth.fill_price(name, r["min_qty"])
             fp_s = f", {r['min_qty']} шт від ${fp:.2f}" if fp is not None else ""
-            tail = (f"зараз {now}; по <= ${r['target_price']:.2f}: {have_s} "
-                    f"(треба x{r['min_qty']}){fp_s}")
+            tail = (f"по <= ${r['target_price']:.2f}: {have_s} (треба x{r['min_qty']})"
+                    f"{fp_s}\n     {mkt}")
         else:
-            tail = f"зараз {now}, ціль <= ${r['target_price']:.2f}"
-        out.append(f"#{r['id']}  {name}  —  {tail}{state}")
+            tail = f"{mkt}  |  ціль <= ${r['target_price']:.2f}"
+        out.append(f"#{r['id']}  {name}\n   {tail}{state}")
     return "\n".join(out), keyboards.list_kb(rows)
 
 
-async def _depth_view(user_id: int, wid: int, client, depth):
+async def _depth_view(user_id: int, wid: int, client, depth, market):
     w = await db.get_watch(user_id, wid)
     if w is None:
         return f"Немає стеження #{wid}.", keyboards.back_kb()
@@ -115,8 +122,8 @@ async def _depth_view(user_id: int, wid: int, client, depth):
     rungs = depth.ladder(name, 12, from_price=sp)
     out = [name]
     if sp is not None:
-        out.append(f"ціна на сайті: ${sp:.2f}")
-    out += [f"глибина оновлена {depth.age_min()} хв тому", "", "ціна    шт     сумарно"]
+        out.append(f"lis-skins: ${sp:.2f}   (глибина {depth.age_min()} хв тому)")
+    out += ["", "ціна    шт     сумарно"]
     cum = 0
     for p, q in rungs:
         cum += q
@@ -128,11 +135,28 @@ async def _depth_view(user_id: int, wid: int, client, depth):
     if fill is not None:
         out.append(f"{q_want} шт набрати від: ${fill:.2f}")
     out.append(f"по <= ${w['target_price']:.2f}: {have} шт (ціль x{w['min_qty']})")
+    other = [(lbl, q) for k, lbl, q in market.quotes(name) if k != "lis"]
+    if other:
+        out.append("")
+        out.append("--- інші ринки ---")
+        for lbl, q in other:
+            out.append(f"{lbl:<14} ${q.price:.2f}" + (f"  ({q.qty})" if q.qty else ""))
     return "\n".join(out), keyboards.depth_kb(wid)
 
 
+async def _compare_view(name: str, market):
+    qs = sorted(market.quotes(name), key=lambda t: t[2].price)
+    if not qs:
+        return f"{name}\nніде не знайшов ціни.", keyboards.back_kb()
+    out = [name, ""]
+    for _, lbl, q in qs:
+        extra = f"  ({q.qty} шт)" if q.qty else ""
+        out.append(f"{lbl:<14} ${q.price:.2f}{extra}")
+    return "\n".join(out), keyboards.back_kb()
+
+
 async def _add_watch(uid: int, chat_id: int, raw_name: str, price: float,
-                     qty: int, client, depth):
+                     qty: int, client, depth, market):
     canonical, exact = matcher.resolve(raw_name, client.names)
     if canonical is None:
         sugg = [n for n, s in matcher.best_matches(raw_name, client.names, 8)
@@ -148,20 +172,21 @@ async def _add_watch(uid: int, chat_id: int, raw_name: str, price: float,
 
     verb = "Стежу" if action == "created" else "Оновив"
     lines = [f"{verb} [#{wid}]: {canonical}", f"Ціль: <= ${price:.2f}"]
-    sp = depth.site_price(canonical)
-    if sp is not None:
-        lines.append(f"Ціна зараз: ${sp:.2f}")
+    mkt = _mkt_line(canonical, market)
+    if mkt:
+        lines.append(f"Зараз: {mkt}")
+        best = market.best(canonical)
+        if best is not None:
+            lines.append(f"Найдешевше: {best[1]} — ${best[2].price:.2f}")
     else:
-        item = client.lookup(canonical)
-        if item is not None:
-            lines.append(f"Ціна зараз: ${item.price:.2f} (уточниться за хвилину)")
+        lines.append("Ціна зʼявиться після наступного оновлення.")
         asyncio.create_task(_kick_depth(depth))
     if qty > 1:
         have = depth.buyable_qty(canonical, price)
         if have is not None:
             fp = depth.fill_price(canonical, qty)
             fp_s = f", {qty} шт від ${fp:.2f}" if fp is not None else ""
-            lines.append(f"Зараз по <= ${price:.2f}: {have} шт (треба x{qty}){fp_s}")
+            lines.append(f"lis-skins по <= ${price:.2f}: {have} шт (треба x{qty}){fp_s}")
         else:
             lines.append(f"Треба >= {qty} шт (глибина зʼявиться за хвилину)")
             asyncio.create_task(_kick_depth(depth))
@@ -177,17 +202,6 @@ async def _kick_depth(depth):
             await depth.refresh(names)
     except Exception:
         log.exception("ad-hoc depth refresh failed")
-
-
-_ADD_PROMPT = (
-    "Надішли одним рядком:\n"
-    "  <назва> <ціна>            або\n"
-    "  <назва> <ціна> x<шт>\n\n"
-    "Приклади:\n"
-    "  AWP | Asiimov (Field-Tested) 55\n"
-    "  Kilowatt Case 0.13 x200\n\n"
-    "Не знаєш точну назву — просто напиши частину."
-)
 
 
 # ---------- команди ----------
@@ -215,24 +229,37 @@ async def cmd_whoami(message: Message):
 
 
 @router.message(Command("list"))
-async def cmd_list(message: Message, client, depth):
-    text, kb = await _list_view(message.from_user.id, client, depth)
+async def cmd_list(message: Message, market):
+    text, kb = await _list_view(message.from_user.id, market)
     await message.answer(text, reply_markup=kb)
 
 
 @router.message(Command("depth"))
-async def cmd_depth(message: Message, command: CommandObject, client, depth):
+async def cmd_depth(message: Message, command: CommandObject, client, depth, market):
     try:
         wid = int((command.args or "").strip())
     except ValueError:
         await message.answer("Формат: /depth <id>", reply_markup=keyboards.back_kb())
         return
-    text, kb = await _depth_view(message.from_user.id, wid, client, depth)
+    text, kb = await _depth_view(message.from_user.id, wid, client, depth, market)
+    await message.answer(text, reply_markup=kb)
+
+
+@router.message(Command("compare"))
+async def cmd_compare(message: Message, command: CommandObject, client, market):
+    q = (command.args or "").strip()
+    if not q:
+        await message.answer("Формат: /compare <назва скіна>",
+                             reply_markup=keyboards.menu_kb())
+        return
+    canonical, _ = matcher.resolve(q, client.names)
+    name = canonical or q
+    text, kb = await _compare_view(name, market)
     await message.answer(text, reply_markup=kb)
 
 
 @router.message(Command("watch"))
-async def cmd_watch(message: Message, command: CommandObject, client, depth):
+async def cmd_watch(message: Message, command: CommandObject, client, depth, market):
     if not command.args:
         await message.answer(_ADD_PROMPT, reply_markup=keyboards.menu_kb())
         return
@@ -242,7 +269,7 @@ async def cmd_watch(message: Message, command: CommandObject, client, depth):
         await message.answer(_ADD_PROMPT, reply_markup=keyboards.menu_kb())
         return
     text, kb = await _add_watch(message.from_user.id, message.chat.id,
-                                name, price, qty, client, depth)
+                                name, price, qty, client, depth, market)
     await message.answer(text, reply_markup=kb)
 
 
@@ -292,8 +319,8 @@ async def cmd_unmute(message: Message, command: CommandObject):
 # ---------- нижня клавіатура ----------
 
 @router.message(F.text == "📋 Список")
-async def kb_list(message: Message, client, depth):
-    text, kb = await _list_view(message.from_user.id, client, depth)
+async def kb_list(message: Message, market):
+    text, kb = await _list_view(message.from_user.id, market)
     await message.answer(text, reply_markup=kb)
 
 
@@ -313,7 +340,7 @@ async def kb_help(message: Message):
     await message.answer(HELP, reply_markup=keyboards.menu_kb())
 
 
-# ---------- вільний текст: ціна / «назва ціна» / пошук ----------
+# ---------- вільний текст ----------
 
 async def _do_search(message: Message, q: str, client):
     if not client.ready():
@@ -329,13 +356,12 @@ async def _do_search(message: Message, q: str, client):
 
 
 @router.message(F.text & ~F.text.startswith("/"))
-async def on_text(message: Message, client, depth):
+async def on_text(message: Message, client, depth, market):
     txt = (message.text or "").strip()
     uid = message.from_user.id
     if not txt or len(txt) > 120:
         return
 
-    # 1) чекаємо ціну для вибраного скіна
     if uid in _pending_price:
         name = _pending_price.pop(uid)
         try:
@@ -344,28 +370,28 @@ async def on_text(message: Message, client, depth):
             _pending_price[uid] = name
             await message.answer("Треба число, напр. 55 або 0.44 x200")
             return
-        text, kb = await _add_watch(uid, message.chat.id, name, price, qty, client, depth)
+        text, kb = await _add_watch(uid, message.chat.id, name, price, qty,
+                                    client, depth, market)
         await message.answer(text, reply_markup=kb)
         return
 
-    # 2) схоже на «<назва> <ціна> [x<шт>]»
     try:
         name, price, qty = _parse_watch_args(txt)
     except ValueError:
         name = None
     if name is not None:
-        text, kb = await _add_watch(uid, message.chat.id, name, price, qty, client, depth)
+        text, kb = await _add_watch(uid, message.chat.id, name, price, qty,
+                                    client, depth, market)
         await message.answer(text, reply_markup=kb)
         return
 
-    # 3) інакше — пошук
     await _do_search(message, txt, client)
 
 
 # ---------- інлайн-кнопки ----------
 
 @router.callback_query()
-async def on_callback(cb: CallbackQuery, client, depth):
+async def on_callback(cb: CallbackQuery, client, depth, market):
     if cb.message is None:
         await cb.answer()
         return
@@ -377,28 +403,23 @@ async def on_callback(cb: CallbackQuery, client, depth):
         await cb.message.answer(_menu_text(), reply_markup=keyboards.menu_kb())
         await cb.answer()
         return
-
     if action == "help":
         await cb.message.answer(HELP, reply_markup=keyboards.menu_kb())
         await cb.answer()
         return
-
     if action == "add":
         await cb.message.answer(_ADD_PROMPT, reply_markup=keyboards.menu_kb())
         await cb.answer()
         return
-
     if action == "find":
         await cb.message.answer("Напиши назву скіна або частину — покажу варіанти.")
         await cb.answer()
         return
-
     if action == "lst":
-        text, kb = await _list_view(uid, client, depth)
+        text, kb = await _list_view(uid, market)
         await cb.message.answer(text, reply_markup=kb)
         await cb.answer()
         return
-
     if action == "pk":
         try:
             idx = int(sid)
@@ -407,9 +428,7 @@ async def on_callback(cb: CallbackQuery, client, depth):
             await cb.answer("застаріло, повтори пошук")
             return
         _pending_price[uid] = name
-        await cb.message.answer(
-            f"«{name}»\nНадішли ціну: напр. 55 або 0.44 x200"
-        )
+        await cb.message.answer(f"«{name}»\nНадішли ціну: напр. 55 або 0.44 x200")
         await cb.answer()
         return
 
@@ -420,7 +439,16 @@ async def on_callback(cb: CallbackQuery, client, depth):
         return
 
     if action == "dep":
-        text, kb = await _depth_view(uid, wid, client, depth)
+        text, kb = await _depth_view(uid, wid, client, depth, market)
+        await cb.message.answer(text, reply_markup=kb)
+        await cb.answer()
+        return
+    if action == "cmp":
+        w = await db.get_watch(uid, wid)
+        if w is None:
+            await cb.answer("нема такого")
+            return
+        text, kb = await _compare_view(w["skin_name"], market)
         await cb.message.answer(text, reply_markup=kb)
         await cb.answer()
         return
@@ -438,7 +466,7 @@ async def on_callback(cb: CallbackQuery, client, depth):
         await cb.answer()
         return
 
-    text, kb = await _list_view(uid, client, depth)
+    text, kb = await _list_view(uid, market)
     try:
         await cb.message.edit_text(text, reply_markup=kb)
     except Exception:

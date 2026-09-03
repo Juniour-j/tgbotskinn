@@ -40,6 +40,7 @@ def list_kb(rows) -> InlineKeyboardMarkup:
         )
         kb.append([
             InlineKeyboardButton(text=f"📊 #{wid}", callback_data=f"dep:{wid}"),
+            InlineKeyboardButton(text=f"🔀 #{wid}", callback_data=f"cmp:{wid}"),
             mute_btn,
             InlineKeyboardButton(text=f"🗑 #{wid}", callback_data=f"del:{wid}"),
         ])
@@ -54,16 +55,18 @@ def list_kb(rows) -> InlineKeyboardMarkup:
 def depth_kb(wid: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔄 Оновити", callback_data=f"dep:{wid}"),
-         InlineKeyboardButton(text="📋 Список", callback_data="lst:0")],
-        [_HOME],
+         InlineKeyboardButton(text="🔀 Порівняти", callback_data=f"cmp:{wid}")],
+        [InlineKeyboardButton(text="📋 Список", callback_data="lst:0"), _HOME],
     ])
 
 
 def after_add_kb(wid: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"📊 глибина #{wid}", callback_data=f"dep:{wid}"),
-         InlineKeyboardButton(text=f"🗑 прибрати #{wid}", callback_data=f"del:{wid}")],
-        [InlineKeyboardButton(text="📋 Список", callback_data="lst:0"), _HOME],
+         InlineKeyboardButton(text=f"🔀 порівняти #{wid}", callback_data=f"cmp:{wid}")],
+        [InlineKeyboardButton(text=f"🗑 прибрати #{wid}", callback_data=f"del:{wid}"),
+         InlineKeyboardButton(text="📋 Список", callback_data="lst:0")],
+        [_HOME],
     ])
 
 
