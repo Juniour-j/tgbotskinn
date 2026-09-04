@@ -35,7 +35,11 @@ HELP = (
     "Не знаєш назву — напиши частину («kilowatt»), покажу варіанти.\n\n"
     "У списку: <b>📊 Глибина</b>, <b>📈 Історія</b> і <b>⚙️ Керувати</b> "
     "(🔗 відкрити · ✏️ змінити ціль · 🔀 порівняти · 🔕 тиша · 🗑 видалити).\n"
-    "<b>📈 Історія</b> — діапазон за місяць, тренд за 7/30 дн і чи вигідно зараз.\n"
+    "<b>📈 Історія</b> — діапазон за місяць, тренд за 7/30 дн і чи вигідно зараз.\n\n"
+    "<b>💼 Портфель</b> — веди свої закупки й дивись P&amp;L:\n"
+    "<blockquote><code>/buy Kilowatt Case 200 0.11</code>  — записати купівлю\n"
+    "<code>/sold 3 50 0.13</code>  — продав 50 шт по $0.13\n"
+    "<code>/portfolio</code>  — позиції, вкладено / зараз / прибуток</blockquote>\n"
     "Ще: <code>/top</code> · <code>/status</code> · <code>/compare назва</code> · "
     "<code>/history &lt;id&gt;</code> · <code>/undo</code> (повернути видалене)."
 )
@@ -60,6 +64,8 @@ _STARTED = time.time()
 _pending_price: dict[int, str] = {}     # user_id -> canonical name, чекаємо ціну
 _pending_edit: dict[int, int] = {}      # user_id -> watch_id, чекаємо нову ціль
 _pending_compare: set[int] = set()      # user_id -> чекаємо назву для /compare
+_pending_buy: set[int] = set()          # user_id -> чекаємо "назва qty ціна" для купівлі
+_pending_sell: dict[int, int] = {}      # user_id -> holding_id, чекаємо "qty ціна" продажу
 _last_search: dict[int, list] = {}      # user_id -> список знайдених назв
 _sort_mode: dict[int, str] = {}         # user_id -> "state"|"price"|"name"
 _last_deleted: dict[int, list] = {}     # user_id -> [{skin_name,target_price,min_qty,direction}, ...]
@@ -180,6 +186,40 @@ def _parse_price_qty(s: str):
     return price, qty, direction
 
 
+def _num(tok: str) -> float:
+    return float(tok.strip().lstrip("$").replace(",", "."))
+
+
+def _parse_buy_args(args: str):
+    """'<назва> <qty> <ціна>' → (name, qty, price)."""
+    toks = args.split()
+    if len(toks) < 3:
+        raise ValueError
+    qty = int(_num(toks[-2]))
+    price = _num(toks[-1])
+    name = " ".join(toks[:-2]).strip()
+    if not name or qty < 1 or price <= 0:
+        raise ValueError
+    return name, qty, price
+
+
+def _parse_sold_args(rest: str):
+    """'[qty|all] [ціна]' → (qty|None, price|None). None qty = закрити повністю."""
+    toks = rest.split()
+    qty = None
+    price = None
+    if toks and toks[0].lower() in ("all", "усе", "все", "всі", "*"):
+        toks = toks[1:]
+    elif toks and toks[0].replace(".", "", 1).isdigit() and "." not in toks[0]:
+        qty = int(toks[0])
+        toks = toks[1:]
+    if toks:
+        price = _num(toks[0])
+    if (qty is not None and qty < 1) or (price is not None and price <= 0):
+        raise ValueError
+    return qty, price
+
+
 # ---------- спільні екрани ----------
 
 def _menu_text() -> str:
@@ -206,6 +246,10 @@ def _n(x) -> str:
 
 def _money(x) -> str:
     return "$" + f"{x:,.2f}".replace(",", " ")
+
+
+def _money_signed(x) -> str:
+    return ("−" if x < 0 else "+") + _money(abs(x))
 
 
 def _mkt_line(name: str, market, short: bool = False) -> str:
@@ -579,6 +623,97 @@ async def _history_view(user_id: int, wid: int, market):
     return "\n".join(lines), keyboards.history_kb(wid)
 
 
+# ---------- портфель ----------
+
+async def _portfolio_view(user_id: int, market):
+    rows = await db.list_holdings(user_id)
+    if not rows:
+        return ("<b>💼 Портфель порожній</b>\n\n"
+                "Запиши купівлю одним рядком:\n"
+                "<blockquote><code>/buy Kilowatt Case 200 0.11</code></blockquote>"
+                "або тисни ➕ Купівля."), keyboards.portfolio_kb([])
+
+    blocks = []
+    tot_cost = tot_now = 0.0
+    full = True
+    for h in rows:
+        name, qty, bp = h["skin_name"], h["qty"], h["buy_price"]
+        cost = qty * bp
+        tot_cost += cost
+        best = market.best(name)
+        base = (f"<b>#{h['id']} {_esc(name)}</b>\n"
+                f"{_n(qty)} шт · вклав {_money(cost)} ({_money(bp)}/шт)")
+        if best is None:
+            full = False
+            blocks.append(f"<blockquote>{base}\nринкової ціни ще нема</blockquote>")
+            continue
+        _, lbl, q = best
+        now = qty * q.price
+        tot_now += now
+        pl = now - cost
+        plp = pl / cost * 100 if cost else 0.0
+        emo = "📈" if pl > 0 else ("📉" if pl < 0 else "→")
+        blocks.append(
+            f"<blockquote>{base}\n"
+            f"ринок {_money(q.price)} {_SHORT.get(lbl, lbl)} · зараз {_money(now)}\n"
+            f"P&amp;L {emo} <b>{_money_signed(pl)}</b> ({_pct_str(plp)})</blockquote>")
+
+    lines = [f"<b>💼 Портфель</b> · {len(rows)} поз", *blocks]
+    if full and tot_cost:
+        tpl = tot_now - tot_cost
+        emo = "📈" if tpl > 0 else ("📉" if tpl < 0 else "→")
+        lines.append(f"Разом: вклав {_money(tot_cost)} · зараз {_money(tot_now)} · "
+                     f"P&amp;L {emo} <b>{_money_signed(tpl)}</b> "
+                     f"({_pct_str(tpl / tot_cost * 100)})")
+    else:
+        lines.append(f"Разом вкладено: {_money(tot_cost)} "
+                     f"<i>(ринок ще не по всіх позиціях)</i>")
+    return "\n".join(lines), keyboards.portfolio_kb(rows)
+
+
+async def _do_buy(uid: int, raw_name: str, qty: int, price: float, client, market):
+    canonical, exact = matcher.resolve(raw_name, client.names)
+    name = canonical or raw_name
+    hid = await db.add_holding(uid, name, qty, price)
+    cost = qty * price
+    lines = [f"✅ <b>Записав купівлю</b> #{hid}", f"<b>{_esc(name)}</b>"]
+    if canonical and not exact:
+        lines.append("<i>(назву підібрав за схожістю)</i>")
+    lines.append(f"{_n(qty)} шт × {_money(price)} = <b>{_money(cost)}</b>")
+    best = market.best(name)
+    if best is not None:
+        now = qty * best[2].price
+        lines.append(f"Ринок зараз: {_money(best[2].price)} → {_money(now)} "
+                     f"({_money_signed(now - cost)})")
+    text, kb = await _portfolio_view(uid, market)
+    return "\n".join(lines) + "\n\n" + text, kb
+
+
+async def _do_sell(uid: int, hid: int, qty, price, market):
+    h = await db.get_holding(uid, hid)
+    if h is None:
+        rows = await db.list_holdings(uid)
+        return f"Немає позиції #{hid}.", keyboards.portfolio_kb(rows)
+    sell_qty = h["qty"] if qty is None else min(qty, h["qty"])
+    if price is None:
+        best = market.best(h["skin_name"])
+        price = best[2].price if best else None
+    await db.reduce_holding(uid, hid, sell_qty)
+    lines = [f"💰 <b>Продано</b> {_n(sell_qty)} шт · {_esc(h['skin_name'])}"]
+    if price is not None:
+        realized = (price - h["buy_price"]) * sell_qty
+        plp = (price / h["buy_price"] - 1) * 100 if h["buy_price"] else 0.0
+        lines.append(f"по {_money(price)} · виторг {_money(price * sell_qty)}")
+        lines.append(f"P&amp;L {_money_signed(realized)} ({_pct_str(plp)})")
+    else:
+        lines.append("<i>ціну не задано й ринку нема — P&amp;L не порахував</i>")
+    left = await db.get_holding(uid, hid)
+    if left:
+        lines.append(f"Залишок: {_n(left['qty'])} шт по {_money(left['buy_price'])}")
+    text, kb = await _portfolio_view(uid, market)
+    return "\n".join(lines) + "\n\n" + text, kb
+
+
 def _bar(q: int, mx: int, width: int = 10) -> str:
     filled = round(q / mx * width) if mx else 0
     return "█" * filled + "░" * (width - filled)
@@ -813,6 +948,51 @@ async def cmd_top(message: Message, market):
     await message.answer(text, reply_markup=kb)
 
 
+@router.message(Command("portfolio", "pf"))
+async def cmd_portfolio(message: Message, market):
+    text, kb = await _portfolio_view(message.from_user.id, market)
+    await message.answer(text, reply_markup=kb)
+
+
+@router.message(Command("buy"))
+async def cmd_buy(message: Message, command: CommandObject, client, market):
+    if not command.args:
+        _pending_buy.add(message.from_user.id)
+        await message.answer(
+            "Купівля — одним рядком <code>назва qty ціна</code>:\n"
+            "<blockquote><code>Kilowatt Case 200 0.11</code></blockquote>",
+            reply_markup=keyboards.back_kb())
+        return
+    try:
+        name, qty, price = _parse_buy_args(command.args)
+    except ValueError:
+        await message.answer("Формат: <code>/buy назва qty ціна</code> — напр. "
+                             "<code>/buy Kilowatt Case 200 0.11</code>")
+        return
+    text, kb = await _do_buy(message.from_user.id, name, qty, price, client, market)
+    await message.answer(text, reply_markup=kb)
+
+
+@router.message(Command("sold"))
+async def cmd_sold(message: Message, command: CommandObject, market):
+    toks = (command.args or "").split()
+    if not toks or not toks[0].lstrip("#").isdigit():
+        await message.answer(
+            "Формат: <code>/sold &lt;id&gt; [qty|all] [ціна]</code>\n"
+            "напр. <code>/sold 3 50 0.13</code> · <code>/sold 3 0.13</code> (усе по $0.13) · "
+            "<code>/sold 3</code> (усе за ринком)",
+            reply_markup=keyboards.back_kb())
+        return
+    hid = int(toks[0].lstrip("#"))
+    try:
+        qty, price = _parse_sold_args(" ".join(toks[1:]))
+    except ValueError:
+        await message.answer("qty — ціле, ціна — додатна. Напр. <code>/sold 3 50 0.13</code>")
+        return
+    text, kb = await _do_sell(message.from_user.id, hid, qty, price, market)
+    await message.answer(text, reply_markup=kb)
+
+
 @router.message(Command("history"))
 async def cmd_history(message: Message, command: CommandObject, market):
     arg = (command.args or "").strip().lstrip("#")
@@ -999,6 +1179,34 @@ async def on_text(message: Message, client, depth, market):
             sent, nm, market, lambda: _compare_view(uid, nm, market)))
         return
 
+    # купівля в портфель: "назва qty ціна"
+    if uid in _pending_buy:
+        _pending_buy.discard(uid)
+        try:
+            name, qty, price = _parse_buy_args(txt)
+        except ValueError:
+            _pending_buy.add(uid)
+            await message.answer("Треба: <code>назва qty ціна</code> — напр. "
+                                 "<code>Kilowatt Case 200 0.11</code>")
+            return
+        text, kb = await _do_buy(uid, name, qty, price, client, market)
+        await message.answer(text, reply_markup=kb)
+        return
+
+    # продаж позиції: "[qty|all] [ціна]"
+    if uid in _pending_sell:
+        hid = _pending_sell.pop(uid)
+        try:
+            qty, price = _parse_sold_args(txt)
+        except ValueError:
+            _pending_sell[uid] = hid
+            await message.answer("Треба: <code>qty ціна</code>, <code>all ціна</code>, "
+                                 "лише ціну (усе) або <code>all</code>.")
+            return
+        text, kb = await _do_sell(uid, hid, qty, price, market)
+        await message.answer(text, reply_markup=kb)
+        return
+
     # нова ціль для стеження, що редагується
     if uid in _pending_edit:
         wid = _pending_edit.pop(uid)
@@ -1073,6 +1281,9 @@ async def on_callback(cb: CallbackQuery, client, depth, market):
         page = int(sid) if sid.isdigit() else _last_page.get(uid, 0)
         await _show(cb, *await _list_view(uid, market, page))
         return
+    if action == "pf":
+        await _show(cb, *await _portfolio_view(uid, market))
+        return
     if action == "srt":
         if sid in ("state", "price", "name"):
             _sort_mode[uid] = sid
@@ -1110,6 +1321,32 @@ async def on_callback(cb: CallbackQuery, client, depth, market):
     if action == "cmpask":
         _pending_compare.add(uid)
         await cb.message.answer("Напиши назву скіна — покажу ціни на всіх ринках.")
+        await cb.answer()
+        return
+    if action == "pfadd":
+        _pending_buy.add(uid)
+        await cb.message.answer(
+            "Купівля — рядком <code>назва qty ціна</code>:\n"
+            "<blockquote><code>Kilowatt Case 200 0.11</code></blockquote>")
+        await cb.answer()
+        return
+    if action == "pfs":
+        try:
+            hid = int(sid)
+        except ValueError:
+            await cb.answer()
+            return
+        h = await db.get_holding(uid, hid)
+        if h is None:
+            await cb.answer("нема позиції")
+            return
+        _pending_sell[uid] = hid
+        best = market.best(h["skin_name"])
+        mp = f"  ·  ринок {_money(best[2].price)}" if best else ""
+        await cb.message.answer(
+            f"<b>Продаж #{hid}</b> · {_esc(h['skin_name'])} — {_n(h['qty'])} шт{mp}\n"
+            "Напиши <code>qty ціна</code>, <code>all ціна</code>, лише ціну (усе) "
+            "або <code>all</code> (усе за ринком):")
         await cb.answer()
         return
     if action == "cwatch":

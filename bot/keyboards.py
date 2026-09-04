@@ -40,7 +40,8 @@ PAGE = 8  # стежень на сторінку списку
 def menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📋 Мої стеження", callback_data="lst")],
-        [InlineKeyboardButton(text="➕ Додати стеження", callback_data="add")],
+        [InlineKeyboardButton(text="➕ Додати стеження", callback_data="add"),
+         InlineKeyboardButton(text="💼 Портфель", callback_data="pf")],
         [InlineKeyboardButton(text="🔀 Порівняти ціни", callback_data="cmpask"),
          InlineKeyboardButton(text="💸 Топ", callback_data="top:cheap:0")],
         [InlineKeyboardButton(text="🔎 Знайти скін", callback_data="find"),
@@ -218,6 +219,22 @@ def find_kb(items) -> InlineKeyboardMarkup:
 
 def back_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[_LIST, _HOME]])
+
+
+def portfolio_kb(rows) -> InlineKeyboardMarkup:
+    """Кнопка «продав» на кожну позицію + керування."""
+    kb, r = [], []
+    for h in list(rows)[:15]:
+        r.append(InlineKeyboardButton(text=f"💰 #{h['id']}", callback_data=f"pfs:{h['id']}"))
+        if len(r) == 3:
+            kb.append(r)
+            r = []
+    if r:
+        kb.append(r)
+    kb.append([InlineKeyboardButton(text="➕ Купівля", callback_data="pfadd"),
+               InlineKeyboardButton(text="🔄 Оновити", callback_data="pf")])
+    kb.append([_LIST, _HOME])
+    return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
 def alert_kb(label: str, url: str, wid: int) -> InlineKeyboardMarkup:
