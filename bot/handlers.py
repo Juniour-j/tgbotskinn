@@ -13,7 +13,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, Message
 
-from . import alerts, db, keyboards, matcher
+from . import alerts, db, history, keyboards, matcher
 
 log = logging.getLogger("handlers")
 router = Router()
@@ -33,10 +33,11 @@ HELP = (
     "<b>На зростання</b> (для продажу) — додай <code>вгору</code>:\n"
     "<blockquote><code>Kilowatt Case 0.20 вгору</code></blockquote>\n"
     "Не знаєш назву — напиши частину («kilowatt»), покажу варіанти.\n\n"
-    "У списку: <b>📊 Глибина</b> і <b>⚙️ Керувати</b> "
+    "У списку: <b>📊 Глибина</b>, <b>📈 Історія</b> і <b>⚙️ Керувати</b> "
     "(🔗 відкрити · ✏️ змінити ціль · 🔀 порівняти · 🔕 тиша · 🗑 видалити).\n"
+    "<b>📈 Історія</b> — діапазон за місяць, тренд за 7/30 дн і чи вигідно зараз.\n"
     "Ще: <code>/top</code> · <code>/status</code> · <code>/compare назва</code> · "
-    "<code>/undo</code> (повернути видалене)."
+    "<code>/history &lt;id&gt;</code> · <code>/undo</code> (повернути видалене)."
 )
 
 _ADD_PROMPT = (
@@ -232,6 +233,38 @@ def _sign(row) -> str:
     return "≥" if row["direction"] == "up" else "≤"
 
 
+_MONTH_H = 30 * 24
+_WEEK_H = 7 * 24
+
+
+def _slice_since(series, hours: int):
+    """Останні `hours` годин із [(hour, price)] (series відсортована за часом)."""
+    if not series:
+        return series
+    cutoff = series[-1][0] - hours
+    return [x for x in series if x[0] >= cutoff]
+
+
+def _pct_str(pct: float) -> str:
+    return f"{pct:+.0f}%".replace("-", "−")
+
+
+def _fmt_trend(pct, lbl: str):
+    if pct is None:
+        return None
+    if abs(pct) < 1:
+        return f"→ ~0% / {lbl}"
+    return f"{'📈' if pct > 0 else '📉'} {_pct_str(pct)} / {lbl}"
+
+
+def _trend_tag(series) -> str:
+    """Компактний ярлик тренду для списку (шум < 2% ховаємо)."""
+    pct = history.change_pct(series)
+    if pct is None or abs(pct) < 2:
+        return ""
+    return f"{'📈' if pct > 0 else '📉'} {_pct_str(pct)} / 7д"
+
+
 async def _list_view(user_id: int, market, page: int = 0):
     rows = await db.list_watches(user_id)
     if not rows:
@@ -240,6 +273,7 @@ async def _list_view(user_id: int, market, page: int = 0):
                 "<blockquote><code>Kilowatt Case 0.13</code></blockquote>"), keyboards.add_kb()
     depth = market.depth
     sort = _sort_mode.get(user_id, "state")
+    hist_map = await db.price_series_bulk((r["skin_name"] for r in rows), _WEEK_H)
     entries = []  # (row, block, met, cheapest_price)
     for r in rows:
         name = _esc(r["skin_name"])
@@ -247,6 +281,8 @@ async def _list_view(user_id: int, market, page: int = 0):
         mkt = _mkt_line(r["skin_name"], market, short=True) or "ціни ще нема"
         best = market.best(r["skin_name"])
         cheap = best[2].price if best else 1e12
+        tag = _trend_tag(hist_map.get(r["skin_name"], []))
+        trend = f"  ·  {tag}" if tag else ""
         if r["min_qty"] > 1:
             have = depth.buyable_qty(r["skin_name"], t)
             met = have is not None and have >= r["min_qty"]
@@ -255,7 +291,7 @@ async def _list_view(user_id: int, market, page: int = 0):
             fill = f" · набрати {r['min_qty']} від <b>${fp:.2f}</b>" if fp else ""
             head = db.muted_label(r) or _icon(r, met)
             block = (f"<blockquote>{head} <b>#{r['id']} {name}</b>  · опт ≥{r['min_qty']}\n"
-                     f"ціль ≤ ${t:.2f}  ·  зараз {now}{fill}\n<i>{mkt}</i></blockquote>")
+                     f"ціль ≤ ${t:.2f}  ·  зараз {now}{fill}\n<i>{mkt}</i>{trend}</blockquote>")
         else:
             met = best is not None and alerts.hit(t, best[2].price, r["direction"])
             if best is not None:
@@ -269,7 +305,7 @@ async def _list_view(user_id: int, market, page: int = 0):
                 now = "?"
             head = db.muted_label(r) or _icon(r, met)
             block = (f"<blockquote>{head} <b>#{r['id']} {name}</b>\n"
-                     f"ціль {sg} ${t:.2f}  ·  зараз {now}\n<i>{mkt}</i></blockquote>")
+                     f"ціль {sg} ${t:.2f}  ·  зараз {now}\n<i>{mkt}</i>{trend}</blockquote>")
         entries.append((r, block, met and not db.is_muted(r), cheap))
 
     def _grp(e):
@@ -289,7 +325,8 @@ async def _list_view(user_id: int, market, page: int = 0):
     chunk = entries[page * keyboards.PAGE:(page + 1) * keyboards.PAGE]
     done = sum(1 for _, _, a, _ in entries if a)
     has_trig = any(e[0]["triggered"] for e in entries)
-    hdr = f"<b>Стеження</b> · {len(entries)}" + (f"   ✅ {done}" if done else "")
+    hdr = (f"<b>Стеження</b> · {len(entries)}" + (f"   ✅ {done}" if done else "")
+           + "\n<i>кнопки: 📊 глибина · 📈 історія · ⚙️ керувати</i>")
 
     _GH = {0: "✅ Готові", 1: "⏳ Чекають", 2: "🔕 Тиша"}
     parts, last = [], None
@@ -473,6 +510,12 @@ async def _watch_card(user_id: int, wid: int, market):
     if w["triggered"]:
         na = _notified_ago(w)
         inner.append(f"<b>Алерт</b>  надіслано {na}" if na else "<b>Алерт</b>  надіслано")
+    series = await db.price_series(name, _MONTH_H)
+    if len(series) >= 3:
+        tr = [x for x in (_fmt_trend(history.change_pct(_slice_since(series, _WEEK_H)), "7д"),
+                          _fmt_trend(history.change_pct(series), "30д")) if x]
+        if tr:
+            inner.append("<b>Тренд</b>  " + "   ".join(tr))
     lines = [f"<b>#{wid} · {_esc(name)}</b>", "",
              "<blockquote>" + "\n".join(inner) + "</blockquote>"]
     qs = sorted(market.quotes(name), key=lambda x: x[2].price)
@@ -484,6 +527,56 @@ async def _watch_card(user_id: int, wid: int, market):
             lines.append(sn)
     return ("\n".join(lines),
             keyboards.watch_kb(wid, db.is_muted(w), _open_links(name, market)))
+
+
+async def _history_view(user_id: int, wid: int, market):
+    w = await db.get_watch(user_id, wid)
+    if w is None:
+        return f"Немає стеження #{wid}.", keyboards.back_kb()
+    name = w["skin_name"]
+    series = await db.price_series(name, _MONTH_H)
+    best = market.best(name)
+    cur = best[2].price if best else None
+    head = f"<b>📈 #{wid} · {_esc(name)}</b>"
+
+    if len(series) < 3:
+        note = ("Історія ще накопичується — знімок ціни береться раз на цикл.\n"
+                "Перші висновки будуть за кілька годин, повний зріз — за добу-дві.")
+        tail = f"\n\nЦіль {_sign(w)} ${w['target_price']:.2f}"
+        if cur is not None:
+            tail += f"  ·  зараз ${cur:.2f}"
+        return f"{head}\n\n{note}{tail}", keyboards.history_kb(wid)
+
+    st = history.stats(series)
+    span_days = max(1, round((series[-1][0] - series[0][0]) / 24))
+    d_all = history.change_pct(series)
+    d_week = history.change_pct(_slice_since(series, _WEEK_H))
+    inner = [
+        f"<b>Період</b>  {span_days} дн  ·  {st['n']} знімків",
+        f"<b>Діапазон</b>  ${st['lo']:.2f} – ${st['hi']:.2f}  ·  сер. ${st['avg']:.2f}",
+    ]
+    tr = [x for x in (_fmt_trend(d_week, "7д"),
+                      _fmt_trend(d_all, f"{span_days}д")) if x]
+    if tr:
+        inner.append("<b>Тренд</b>  " + "   ".join(tr))
+    if cur is not None:
+        line = f"<b>Зараз</b>  ${cur:.2f}"
+        pctile = history.cheaper_than_pct(series, cur)
+        if pctile is not None:
+            if pctile >= 60:
+                line += f"  ·  дешевше, ніж {pctile:.0f}% часу за {span_days} дн ✅"
+            elif pctile <= 20:
+                line += f"  ·  дорожче, ніж {100 - pctile:.0f}% часу ⚠️"
+            else:
+                line += "  ·  приблизно середина діапазону"
+        inner.append(line)
+
+    lines = [head, "", "<blockquote>" + "\n".join(inner) + "</blockquote>"]
+    spark = history.sparkline([p for _, p in series], 32)
+    if spark:
+        lines.append(f"<pre>{spark}</pre><i>← раніше · {span_days} дн · зараз →</i>")
+    lines.append(f"Ціль {_sign(w)} ${w['target_price']:.2f}")
+    return "\n".join(lines), keyboards.history_kb(wid)
 
 
 def _bar(q: int, mx: int, width: int = 10) -> str:
@@ -717,6 +810,21 @@ async def cmd_status(message: Message, client, depth, market):
 @router.message(Command("top"))
 async def cmd_top(message: Message, market):
     text, kb = await _top_view(message.from_user.id, market, "cheap")
+    await message.answer(text, reply_markup=kb)
+
+
+@router.message(Command("history"))
+async def cmd_history(message: Message, command: CommandObject, market):
+    arg = (command.args or "").strip().lstrip("#")
+    if not arg.isdigit():
+        rows = await db.list_watches(message.from_user.id)
+        hint = "\n".join(f"#{r['id']} · {_esc(r['skin_name'])}" for r in rows[:15])
+        body = "Формат: <code>/history &lt;id&gt;</code> — id зі списку."
+        if hint:
+            body += "\n\n" + hint
+        await message.answer(body, reply_markup=keyboards.back_kb())
+        return
+    text, kb = await _history_view(message.from_user.id, int(arg), market)
     await message.answer(text, reply_markup=kb)
 
 
@@ -1126,6 +1234,9 @@ async def on_callback(cb: CallbackQuery, client, depth, market):
         if w is not None and not depth.has(w["skin_name"]):
             asyncio.create_task(_depth_followup(
                 cb, uid, wid, w["skin_name"], client, depth, market))
+        return
+    if action == "hist":
+        await _show(cb, *await _history_view(uid, wid, market))
         return
     if action == "cmp":
         w = await db.get_watch(uid, wid)

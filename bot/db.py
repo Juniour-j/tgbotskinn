@@ -1,6 +1,7 @@
-"""SQLite-сховище стежень (aiosqlite). Одне довге зʼєднання на процес."""
+"""SQLite-сховище (aiosqlite). Одне довге зʼєднання на процес."""
 from __future__ import annotations
 
+import time
 from datetime import datetime, timedelta, timezone
 
 import aiosqlite
@@ -27,6 +28,23 @@ CREATE TABLE IF NOT EXISTS watches (
 CREATE INDEX IF NOT EXISTS idx_watches_user ON watches(user_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_watches_uniq
     ON watches(user_id, game, skin_name, target_price);
+
+CREATE TABLE IF NOT EXISTS price_hist (
+    name  TEXT    NOT NULL,
+    hour  INTEGER NOT NULL,
+    price REAL    NOT NULL,
+    PRIMARY KEY (name, hour)
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS holdings (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id   INTEGER NOT NULL,
+    skin_name TEXT    NOT NULL,
+    qty       INTEGER NOT NULL,
+    buy_price REAL    NOT NULL,
+    bought_at TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_holdings_user ON holdings(user_id);
 """
 
 # прості міграції для БД, створених ранішими версіями
@@ -220,3 +238,96 @@ async def set_last_price(watch_id: int, price: float):
         "UPDATE watches SET last_price=? WHERE id=?", (price, watch_id)
     )
     await _db.commit()
+
+
+# ---------- історія цін ----------
+
+async def record_prices(pairs) -> None:
+    """pairs: iterable (name, price). Погодинний знімок (upsert у межах години)."""
+    hour = int(time.time() // 3600)
+    rows = [(n, hour, float(p)) for n, p in pairs if p is not None]
+    if rows:
+        await _db.executemany(
+            "INSERT OR REPLACE INTO price_hist(name, hour, price) VALUES (?, ?, ?)", rows)
+        await _db.commit()
+
+
+async def prune_prices(keep_days: int = 70) -> int:
+    cutoff = int(time.time() // 3600) - keep_days * 24
+    cur = await _db.execute("DELETE FROM price_hist WHERE hour < ?", (cutoff,))
+    await _db.commit()
+    return cur.rowcount
+
+
+async def price_series(name: str, hours: int):
+    since = int(time.time() // 3600) - hours
+    cur = await _db.execute(
+        "SELECT hour, price FROM price_hist WHERE name=? AND hour>=? ORDER BY hour",
+        (name, since),
+    )
+    return [(r["hour"], r["price"]) for r in await cur.fetchall()]
+
+
+async def price_series_bulk(names, hours: int) -> dict:
+    """{name: [(hour, price), ...]} одним запитом — для тренду в списку."""
+    names = list(dict.fromkeys(names))
+    if not names:
+        return {}
+    since = int(time.time() // 3600) - hours
+    ph = ",".join("?" * len(names))
+    cur = await _db.execute(
+        f"SELECT name, hour, price FROM price_hist "
+        f"WHERE hour>=? AND name IN ({ph}) ORDER BY name, hour",
+        (since, *names),
+    )
+    out: dict[str, list] = {}
+    for r in await cur.fetchall():
+        out.setdefault(r["name"], []).append((r["hour"], r["price"]))
+    return out
+
+
+# ---------- портфель ----------
+
+async def add_holding(user_id: int, name: str, qty: int, price: float) -> int:
+    cur = await _db.execute(
+        "INSERT INTO holdings(user_id, skin_name, qty, buy_price, bought_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (user_id, name, qty, price, _now()),
+    )
+    await _db.commit()
+    return cur.lastrowid
+
+
+async def list_holdings(user_id: int):
+    cur = await _db.execute(
+        "SELECT * FROM holdings WHERE user_id=? ORDER BY skin_name, id", (user_id,)
+    )
+    return await cur.fetchall()
+
+
+async def get_holding(user_id: int, hid: int):
+    cur = await _db.execute(
+        "SELECT * FROM holdings WHERE user_id=? AND id=?", (user_id, hid)
+    )
+    return await cur.fetchone()
+
+
+async def reduce_holding(user_id: int, hid: int, qty: int) -> bool:
+    """Продати qty шт з позиції: зменшити або видалити."""
+    row = await get_holding(user_id, hid)
+    if row is None:
+        return False
+    if qty >= row["qty"]:
+        await _db.execute("DELETE FROM holdings WHERE id=?", (hid,))
+    else:
+        await _db.execute("UPDATE holdings SET qty=qty-? WHERE id=?", (qty, hid))
+    await _db.commit()
+    return True
+
+
+async def remove_holding(user_id: int, hid: int) -> bool:
+    cur = await _db.execute(
+        "DELETE FROM holdings WHERE user_id=? AND id=?", (user_id, hid)
+    )
+    await _db.commit()
+    return cur.rowcount > 0

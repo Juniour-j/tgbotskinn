@@ -78,7 +78,8 @@ def list_kb(page_rows, page: int, pages: int, sort: str,
         wid = r["id"]
         kb.append([
             InlineKeyboardButton(text=f"📊 #{wid}", callback_data=f"dep:{wid}"),
-            InlineKeyboardButton(text=f"⚙️ Керувати #{wid}", callback_data=f"w:{wid}"),
+            InlineKeyboardButton(text=f"📈 #{wid}", callback_data=f"hist:{wid}"),
+            InlineKeyboardButton(text=f"⚙️ #{wid}", callback_data=f"w:{wid}"),
         ])
     if undo:
         n = undo if isinstance(undo, int) else 1
@@ -152,6 +153,7 @@ def watch_kb(wid: int, muted: bool, open_links=None) -> InlineKeyboardMarkup:
         kb.append([InlineKeyboardButton(text=f"🔗 Відкрити {label}", url=url)])
     kb.append([
         InlineKeyboardButton(text="📊 Глибина", callback_data=f"dep:{wid}"),
+        InlineKeyboardButton(text="📈 Історія", callback_data=f"hist:{wid}"),
         InlineKeyboardButton(text="🔀 Порівняти", callback_data=f"cmp:{wid}"),
     ])
     mute = ("🔔 Звук", f"unm:{wid}") if muted else ("🔕 Тиша…", f"snz:{wid}")
@@ -170,6 +172,16 @@ def watch_kb(wid: int, muted: bool, open_links=None) -> InlineKeyboardMarkup:
 def depth_kb(wid: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔄 Оновити", callback_data=f"dep:{wid}"),
+         InlineKeyboardButton(text="📈 Історія", callback_data=f"hist:{wid}"),
+         InlineKeyboardButton(text="⚙️ Керувати", callback_data=f"w:{wid}")],
+        [_LIST, _HOME],
+    ])
+
+
+def history_kb(wid: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Оновити", callback_data=f"hist:{wid}"),
+         InlineKeyboardButton(text="📊 Глибина", callback_data=f"dep:{wid}"),
          InlineKeyboardButton(text="⚙️ Керувати", callback_data=f"w:{wid}")],
         [_LIST, _HOME],
     ])

@@ -67,12 +67,15 @@ def _qty_alert(watch, name, qty, depth, market):
 
 async def _cycle(bot, client, depth, market):
     fired: dict[int, list] = {}  # chat_id -> [(text, kb, one_liner)]
+    seen: dict[str, float] = {}  # name -> best price (для історії)
     for w in await db.all_watches():
         name = w["skin_name"]
         min_qty = w["min_qty"] or 1
         muted = db.is_muted(w)
         best = market.best(name)
         price = best[2].price if best else None
+        if price is not None:
+            seen[name] = price
 
         if min_qty > 1:
             qty = depth.buyable_qty(name, w["target_price"])
@@ -101,6 +104,12 @@ async def _cycle(bot, client, depth, market):
             await db.mark_triggered(w["id"], price, False)
         elif price is not None and price != w["last_price"]:
             await db.set_last_price(w["id"], price)
+
+    if seen:
+        try:
+            await db.record_prices(seen.items())
+        except Exception:
+            log.exception("record_prices failed")
 
     for chat_id, items in fired.items():
         if len(items) == 1:
@@ -140,3 +149,17 @@ async def run_depth_refresher(depth, cfg):
         except Exception:
             log.exception("depth refresh cycle error")
         await asyncio.sleep(max(60, cfg.depth_refresh_min * 60))
+
+
+async def run_hist_pruner(keep_days: int = 70):
+    """Раз на добу чистить старі погодинні знімки цін."""
+    while True:
+        try:
+            n = await db.prune_prices(keep_days)
+            if n:
+                log.info("prune_prices: видалено %d записів", n)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("prune_prices cycle error")
+        await asyncio.sleep(24 * 3600)

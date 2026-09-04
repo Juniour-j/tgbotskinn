@@ -9,6 +9,7 @@ from aiogram.types import BotCommand
 _COMMANDS = [
     BotCommand(command="list", description="Мої стеження"),
     BotCommand(command="add", description="Додати стеження"),
+    BotCommand(command="history", description="Історія ціни: /history <id>"),
     BotCommand(command="top", description="Топ: найдешевші / розкид"),
     BotCommand(command="compare", description="Порівняти ціни по ринках"),
     BotCommand(command="status", description="Стан бота і джерел"),
@@ -23,7 +24,7 @@ from .depth import DepthIndex
 from .handlers import router
 from .lis import LisClient
 from .market import Market
-from .poller import run_depth_refresher, run_poller
+from .poller import run_depth_refresher, run_hist_pruner, run_poller
 from .sources import build_sources
 from .steam import SteamPrices
 
@@ -69,6 +70,7 @@ async def main():
     tasks = [
         asyncio.create_task(run_poller(bot, client, depth, market, cfg)),
         asyncio.create_task(run_depth_refresher(depth, cfg)),
+        asyncio.create_task(run_hist_pruner()),
     ]
     try:
         await dp.start_polling(bot)
