@@ -8,9 +8,9 @@ from .sources import Quote
 
 log = logging.getLogger("market")
 
-# суфікси назв контейнерів (щоб не чіпляти «Case Hardened» тощо)
-_CASE_SUFFIX = (" Case", " Capsule", " Package", " Music Kit Box",
-                " Patch Pack", " Pin", " Graffiti Box")
+# лише справжні weapon-кейси (endswith, щоб не чіпляти «Case Hardened» тощо).
+# капсули / піни / графіті / music kit box свідомо не входять — /top тільки по кейсах
+_CASE_SUFFIX = (" Case",)
 
 
 class Market:
@@ -96,6 +96,17 @@ class Market:
             rows.append((q.name, lbl, q.price))
         rows.sort(key=lambda t: t[2])
         return rows[:limit]
+
+    def case_names(self, limit: int = 120):
+        """Назви weapon-кейсів, відомих ext-ринкам, найдешевші перші (для історії/рух-топу)."""
+        rows = []
+        for qs in self._merged().values():
+            _, q = min(qs, key=lambda t: t[1].price)
+            if not q.name or q.price < 0.03 or not self._is_case(q.name):
+                continue
+            rows.append((q.name, q.price))
+        rows.sort(key=lambda t: t[1])
+        return [n for n, _ in rows[:limit]]
 
     def top_spread(self, limit: int = 15, cases_only: bool = True):
         """[(name, lo_lbl, lo_price, hi_lbl, hi_price, pct)] — найбільший розкид між ринками."""

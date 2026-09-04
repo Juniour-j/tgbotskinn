@@ -105,6 +105,15 @@ async def _cycle(bot, client, depth, market):
         elif price is not None and price != w["last_price"]:
             await db.set_last_price(w["id"], price)
 
+    # історія цін: стеження + універсум кейсів (для «топ · рух за 7д»)
+    try:
+        for n in market.case_names(120):
+            if n not in seen:
+                b = market.best(n)
+                if b is not None:
+                    seen[n] = b[2].price
+    except Exception:
+        log.exception("case universe snapshot failed")
     if seen:
         try:
             await db.record_prices(seen.items())

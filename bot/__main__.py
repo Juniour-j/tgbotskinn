@@ -13,7 +13,7 @@ _COMMANDS = [
     BotCommand(command="portfolio", description="Портфель і P&L"),
     BotCommand(command="buy", description="Записати купівлю: /buy назва qty ціна"),
     BotCommand(command="sold", description="Продаж: /sold <id> [qty] [ціна]"),
-    BotCommand(command="top", description="Топ: найдешевші / розкид"),
+    BotCommand(command="top", description="Топ кейсів: дешеві / розкид / рух 7д"),
     BotCommand(command="compare", description="Порівняти ціни по ринках"),
     BotCommand(command="status", description="Стан бота і джерел"),
     BotCommand(command="undo", description="Повернути видалене"),

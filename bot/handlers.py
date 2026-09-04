@@ -228,7 +228,7 @@ def _menu_text() -> str:
         "📋 <b>Мої стеження</b> — список + керування\n"
         "➕ <b>Додати</b> — нове стеження за ціною\n"
         "🔀 <b>Порівняти ціни</b> — по всіх ринках для одного скіна\n"
-        "💸 <b>Топ</b> — найдешевші / найбільший розкид між ринками\n"
+        "💸 <b>Топ кейсів</b> — дешеві / розкид ринків / рух за 7 днів\n"
         "🔎 <b>Знайти скін</b> · 📈 <b>Статус</b> · ❓ <b>Довідка</b>"
     )
 
@@ -408,23 +408,61 @@ async def _status_view(market, client, depth):
     return "\n".join(lines), keyboards.back_kb()
 
 
+async def _top_movers(market, limit: int = 8):
+    """([(name, pct, price)] просіли, [(name, pct, price)] зросли) за 7 днів."""
+    names = market.case_names(150)
+    smap = await db.price_series_bulk(names, _WEEK_H)
+    moved = []
+    for n, s in smap.items():
+        if len(s) < 6:
+            continue
+        pc = history.change_pct(s)
+        if pc is None or abs(pc) < 1:
+            continue
+        moved.append((n, pc, s[-1][1]))
+    drops = sorted((m for m in moved if m[1] < 0), key=lambda t: t[1])[:limit]
+    rises = sorted((m for m in moved if m[1] > 0), key=lambda t: -t[1])[:limit]
+    return drops, rises
+
+
 async def _top_view(uid: int, market, mode: str):
+    if mode == "move":
+        drops, rises = await _top_movers(market)
+        if not drops and not rises:
+            return ("<b>📉 Кейси · рух за 7 днів</b>\n\n"
+                    "Історія ще накопичується — бот пише ціни кейсів щоцикл, "
+                    "перший рух-топ буде десь за добу.", keyboards.top_kb(mode))
+
+        def _tbl(items):
+            return "<pre>" + _esc("\n".join(
+                f"{_pct_str(p):>6}  {_money(pr):>7}  {n}" for n, p, pr in items)) + "</pre>"
+
+        out = ["<b>Кейси · рух за 7 днів</b>"]
+        if drops:
+            out.append("📉 <b>Найбільше просіли</b> — можна брати")
+            out.append(_tbl(drops))
+        if rises:
+            out.append("📈 <b>Найбільше зросли</b> — час продавати")
+            out.append(_tbl(rises))
+        names = [n for n, _, _ in (drops + rises)]
+        _last_top[uid] = names
+        return "\n".join(out), keyboards.top_kb(mode, names)
     if mode == "spread":
         rows = market.top_spread(15)
         if not rows:
-            return ("<b>Топ · розкид</b>\n\nНедостатньо даних (треба 2+ ринки).",
+            return ("<b>↔️ Кейси · розкид між ринками</b>\n\nНедостатньо даних (треба 2+ ринки).",
                     keyboards.top_kb(mode))
         names = [r[0] for r in rows]
         body = [f"{p:>4.0f}%  {_esc(n)}  —  {lo_l} {_money(lo)} → {hi_l} {_money(hi)}"
                 for n, lo_l, lo, hi_l, hi, p in rows]
-        head = "<b>↔️ Топ розкид між ринками</b>"
+        head = "<b>↔️ Кейси · розкид між ринками</b>"
     else:
         rows = market.top_cheapest(15)
         if not rows:
-            return "<b>Топ · найдешевші</b>\n\nЩе нема даних.", keyboards.top_kb(mode)
+            return "<b>💸 Кейси · найдешевші</b>\n\nЩе нема даних.", keyboards.top_kb(mode)
         names = [r[0] for r in rows]
         body = [f"{_money(p):>8}  {_esc(n)}  ({lbl})" for n, lbl, p in rows]
-        head = "<b>💸 Найдешевші зараз</b>"
+        head = "<b>💸 Найдешевші кейси зараз</b>"
     _last_top[uid] = names
     return (head + "\n<pre>" + _esc("\n".join(body)) + "</pre>",
             keyboards.top_kb(mode, names))
@@ -943,8 +981,10 @@ async def cmd_status(message: Message, client, depth, market):
 
 
 @router.message(Command("top"))
-async def cmd_top(message: Message, market):
-    text, kb = await _top_view(message.from_user.id, market, "cheap")
+async def cmd_top(message: Message, command: CommandObject, market):
+    arg = (command.args or "").strip().lower()
+    mode = {"move": "move", "рух": "move", "spread": "spread", "розкид": "spread"}.get(arg, "cheap")
+    text, kb = await _top_view(message.from_user.id, market, mode)
     await message.answer(text, reply_markup=kb)
 
 
@@ -1273,7 +1313,7 @@ async def on_callback(cb: CallbackQuery, client, depth, market):
         return
     if action == "top":
         mode = sid.split(":")[0]
-        if mode not in ("cheap", "spread"):
+        if mode not in ("cheap", "spread", "move"):
             mode = "cheap"
         await _show(cb, *await _top_view(uid, market, mode))
         return

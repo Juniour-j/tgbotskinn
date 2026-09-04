@@ -43,7 +43,7 @@ def menu_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="➕ Додати стеження", callback_data="add"),
          InlineKeyboardButton(text="💼 Портфель", callback_data="pf")],
         [InlineKeyboardButton(text="🔀 Порівняти ціни", callback_data="cmpask"),
-         InlineKeyboardButton(text="💸 Топ", callback_data="top:cheap:0")],
+         InlineKeyboardButton(text="💸 Топ кейсів", callback_data="top:cheap:0")],
         [InlineKeyboardButton(text="🔎 Знайти скін", callback_data="find"),
          InlineKeyboardButton(text="📈 Статус", callback_data="status")],
         [InlineKeyboardButton(text="❓ Довідка", callback_data="help")],
@@ -119,22 +119,26 @@ def snooze_kb(wid: int) -> InlineKeyboardMarkup:
     ])
 
 
+TOP_MODES = (("cheap", "💸 дешеві"), ("spread", "↔️ розкид"), ("move", "📉 рух 7д"))
+
+
 def top_kb(mode: str, names=None) -> InlineKeyboardMarkup:
     kb, row = [], []
     for i, n in enumerate((names or [])[:6]):
         row.append(InlineKeyboardButton(
-            text="⚡ " + n.replace(" Case", "").replace(" Capsule", "")[:18],
-            callback_data=f"tp:{i}"))
+            text="⚡ " + n.replace(" Case", "")[:18], callback_data=f"tp:{i}"))
         if len(row) == 2:
             kb.append(row)
             row = []
     if row:
         kb.append(row)
-    other = "spread" if mode == "cheap" else "cheap"
-    lbl = "↔️ розкид ринків" if other == "spread" else "💸 найдешевші"
-    kb.append([InlineKeyboardButton(text=lbl, callback_data=f"top:{other}:0"),
-               InlineKeyboardButton(text="🔄", callback_data=f"top:{mode}:0")])
-    kb.append([_LIST, _HOME])
+    kb.append([
+        InlineKeyboardButton(text=("• " if m == mode else "") + lbl,
+                             callback_data=f"top:{m}:0")
+        for m, lbl in TOP_MODES
+    ])
+    kb.append([InlineKeyboardButton(text="🔄 Оновити", callback_data=f"top:{mode}:0"),
+               _LIST, _HOME])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
