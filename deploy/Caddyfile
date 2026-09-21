@@ -1,0 +1,13 @@
+# /etc/caddy/Caddyfile — reverse proxy для вебхука Telegram (MODE=webhook).
+# Замініть YOUR_DOMAIN на домен, що вказує на Public IP цієї VM.
+# TLS-сертифікат Caddy отримає й поновлює сам (Let's Encrypt).
+YOUR_DOMAIN {
+	# у бота назовні відкритий лише /webhook (порт має збігатися з WEBAPP_PORT)
+	handle /webhook {
+		reverse_proxy 127.0.0.1:8080
+	}
+	# усе інше — 404
+	handle {
+		respond 404
+	}
+}
