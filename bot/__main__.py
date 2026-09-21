@@ -28,6 +28,7 @@ from .handlers import router
 from .lis import LisClient
 from .market import Market
 from .poller import run_depth_refresher, run_hist_pruner, run_poller
+from .runner import run
 from .sources import build_sources
 from .steam import SteamPrices
 
@@ -75,8 +76,9 @@ async def main():
         asyncio.create_task(run_depth_refresher(depth, cfg)),
         asyncio.create_task(run_hist_pruner()),
     ]
+    log.info("update mode: %s", cfg.mode)
     try:
-        await dp.start_polling(bot)
+        await run(dp, bot, cfg)
     finally:
         for t in tasks:
             t.cancel()

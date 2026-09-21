@@ -149,6 +149,19 @@ DB_PATH=bot.db
 .\.venv\Scripts\python.exe -m pytest
 ```
 
+## Режими отримання апдейтів
+
+| `MODE` | як працює | коли обрати |
+|---|---|---|
+| `polling` (за замовчуванням) | бот сам опитує Telegram | локальний запуск, хостинг без публічного домену |
+| `webhook` | Telegram надсилає апдейти на `https://<домен>/webhook` | VM з доменом і TLS (Oracle: `DEPLOY.md`, розділ 6) |
+
+Для `webhook` потрібні `WEBHOOK_BASE_URL` (https), `WEBHOOK_SECRET` і reverse proxy перед
+`WEBAPP_HOST:WEBAPP_PORT` (за замовчуванням `127.0.0.1:8080`) — приклад у `deploy/Caddyfile`.
+Фонові цикли (алерти, глибина, історія) в обох режимах однакові. Без коректних
+`WEBHOOK_*` бот у режимі `webhook` не стартує й пише, чого бракує.
+Зворотний перехід — `MODE=polling`: бот сам знімає вебхук при старті.
+
 ## Деплой на Railway
 
 1. Запуш репо в GitHub, у Railway → **New Project → Deploy from GitHub**.
@@ -160,7 +173,8 @@ DB_PATH=bot.db
    - (опційно) `POLL_INTERVAL`, `LIS_EXPORT_URL`
 4. **Volume:** додай Volume і примонтуй у `/data`. Без нього SQLite-файл
    зітреться на кожному редеплої (ФС Railway ефемерна).
-5. Бот працює на long polling — жоден вебхук/домен налаштовувати не треба.
+5. За замовчуванням бот працює на long polling — вебхук/домен налаштовувати не треба
+   (вебхук-режим: `MODE=webhook`, див. «Режими отримання апдейтів» нижче).
 
 > Always-on воркер потребує платного плану Railway (Hobby, ~$5/міс);
 > на free trial вичерпаються години.

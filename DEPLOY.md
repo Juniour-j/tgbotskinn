@@ -16,8 +16,8 @@
 7. **Boot volume:** дефолт (~47 GB), нічого не міняти.
 8. **Create.** За ~1 хв інстанс *Running* — скопіювати **Public IP address**.
 
-> Вхідні порти не потрібні (бот працює на long polling, лише вихідні зʼєднання) —
-> Security List / firewall не чіпати.
+> У режимі `polling` (за замовчуванням) вхідні порти не потрібні — бот лише
+> робить вихідні зʼєднання. Для режиму `webhook` див. розділ 6.
 
 ## 2. Зайти на VM
 
@@ -72,6 +72,109 @@ git pull
 .venv/bin/pip install -r requirements.txt
 sudo systemctl restart lis-price-bot
 ```
+
+## 6. Перехід на вебхук (опційно)
+
+За замовчуванням бот працює на long polling (`MODE=polling`). У режимі
+`MODE=webhook` Telegram сам надсилає апдейти на `https://<домен>/webhook`.
+Потрібні: домен, що вказує на Public IP VM, і reverse proxy з TLS (Caddy).
+Фонові цикли (перевірка цін, глибина, історія) працюють так само.
+
+### 6.1 Домен
+
+Свій домен або безкоштовний піддомен (напр. DuckDNS) з A-записом на Public IP VM.
+Перевірка (має вивести IP VM):
+
+```bash
+dig +short <ДОМЕН>
+```
+
+### 6.2 Відкрити порти 80 і 443
+
+**В OCI Console:** ☰ → Networking → Virtual Cloud Networks → ваша VCN → Security →
+Security Lists → Default Security List → **Add Ingress Rules**: Source CIDR `0.0.0.0/0`,
+IP Protocol `TCP`, Destination Port Range `80`; те саме окремим правилом для `443`.
+
+**На самій VM** Ubuntu-образ Oracle за замовчуванням відкидає все, крім SSH. Подивіться
+номер рядка з `REJECT`:
+
+```bash
+sudo iptables -L INPUT -n --line-numbers
+```
+
+Вставте правила **перед** `REJECT` (нижче номер 5 — підставте свій, якщо відрізняється),
+а потім збережіть, щоб вони пережили перезавантаження:
+
+```bash
+sudo iptables -I INPUT 5 -p tcp --dport 80 -j ACCEPT
+sudo iptables -I INPUT 5 -p tcp --dport 443 -j ACCEPT
+sudo netfilter-persistent save
+```
+
+Якщо `netfilter-persistent` немає: `sudo apt install -y iptables-persistent`.
+
+### 6.3 Caddy
+
+```bash
+sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+sudo chmod o+r /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+sudo chmod o+r /etc/apt/sources.list.d/caddy-stable.list
+sudo apt update
+sudo apt install caddy
+```
+
+Покладіть `deploy/Caddyfile` у `/etc/caddy/Caddyfile`, замінивши `YOUR_DOMAIN` на свій
+домен, і перезавантажте Caddy:
+
+```bash
+sudo cp ~/lis-price-bot/deploy/Caddyfile /etc/caddy/Caddyfile
+sudo nano /etc/caddy/Caddyfile
+sudo systemctl reload caddy
+```
+
+### 6.4 Увімкнути вебхук у боті
+
+Секрет згенеруйте на VM (у чат/git не вставляйте):
+
+```bash
+openssl rand -hex 32
+```
+
+Додайте в `~/lis-price-bot/.env` (значення секрету — з команди вище):
+
+```
+MODE=webhook
+WEBHOOK_BASE_URL=https://<ДОМЕН>
+WEBHOOK_SECRET=<секрет>
+```
+
+```bash
+cd ~/lis-price-bot
+git pull
+.venv/bin/pip install -r requirements.txt
+sudo systemctl restart lis-price-bot
+journalctl -u lis-price-bot -n 30 --no-pager      # має бути "update mode: webhook" і "webhook set: ..."
+```
+
+Перевірка на боці Telegram (токен береться з `.env`, у історію shell не потрапляє):
+
+```bash
+set -a; . ./.env; set +a; curl -s "https://api.telegram.org/bot$TELEGRAM_TOKEN/getWebhookInfo"
+```
+
+У відповіді `url` — ваш домен, `last_error_message` — відсутнє. Далі напишіть боту в Telegram.
+
+### 6.5 Відкат на polling
+
+У `.env` поставте `MODE=polling` (або видаліть рядок) і:
+
+```bash
+sudo systemctl restart lis-price-bot
+```
+
+У режимі `polling` бот сам знімає вебхук при старті. Апдейти, що накопичились, не губляться.
 
 ---
 
