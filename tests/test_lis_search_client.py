@@ -78,3 +78,50 @@ def test_fetch_name_single():
         assert lots == {2: 0.22, 1: 0.19}
 
     asyncio.run(go())
+
+
+def test_fetch_name_paginates_within_single_name_until_no_cursor():
+    # регресія на реальний випадок: 333 лоти під ціллю - більше однієї
+    # сторінки (200), для ОДНІЄЇ назви пагінація має продовжуватись
+    pages = [
+        {"data": [{"id": i, "name": "Revolution Case", "price": 0.18} for i in range(200)],
+         "meta": {"per_page": 200, "next_cursor": "p2"}},
+        {"data": [{"id": i, "name": "Revolution Case", "price": 0.19} for i in range(200, 333)],
+         "meta": {"per_page": 200, "next_cursor": None}},
+    ]
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.params.get("cursor"))
+        return httpx.Response(200, json=pages[len(calls) - 1])
+
+    async def go():
+        client = LisSearchClient("key")
+        client._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        try:
+            lots = await client.fetch_name("Revolution Case")
+        finally:
+            await client.aclose()
+        assert len(lots) == 333
+        assert calls == [None, "p2"]
+
+    asyncio.run(go())
+
+
+def test_fetch_name_stops_at_max_pages_safety_cap():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "data": [{"id": 1, "name": "X", "price": 0.1}],
+            "meta": {"per_page": 200, "next_cursor": "always_more"},  # ніби нескінченно
+        })
+
+    async def go():
+        client = LisSearchClient("key")
+        client._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        try:
+            lots = await client.fetch_name("X", max_pages=3)
+        finally:
+            await client.aclose()
+        assert lots == {1: 0.1}  # не зациклилось назавжди
+
+    asyncio.run(go())

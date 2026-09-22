@@ -55,14 +55,30 @@ class LisSearchClient:
         self._url = base_url
         self._http = httpx.AsyncClient(timeout=timeout)
 
-    async def fetch_name(self, name: str, game: str = "csgo") -> dict:
-        """{id лота: ціна} для ОДНІЄЇ назви, одна сторінка (200 найдешевших)."""
-        params = [("game", game), ("sort_by", "lowest_price"),
-                  ("only_unlocked", "1"), ("names[]", name)]
+    async def fetch_name(self, name: str, game: str = "csgo", max_pages: int = 3) -> dict:
+        """{id лота: ціна} для ОДНІЄЇ назви, найдешевші перші.
+
+        Пагінує в межах ЦІЄЇ ОДНІЄЇ назви (свій курсор, ніяких сусідніх names[]
+        поруч) — для дуже ліквідних кейсів (сотні лотів під типовою ціллю)
+        однієї сторінки замало, інакше «скільки під ціллю» занижується.
+        max_pages — запобіжник від нескінченного курсора, не сценарій для назви.
+        """
+        lots: dict = {}
+        cursor = None
         headers = {"Authorization": f"Bearer {self._key}", "Accept": "application/json"}
-        resp = await self._http.get(self._url, params=params, headers=headers)
-        resp.raise_for_status()
-        return parse_search_page(resp.json()).get(name, {})
+        for _ in range(max_pages):
+            params = [("game", game), ("sort_by", "lowest_price"),
+                      ("only_unlocked", "1"), ("names[]", name)]
+            if cursor:
+                params.append(("cursor", cursor))
+            resp = await self._http.get(self._url, params=params, headers=headers)
+            resp.raise_for_status()
+            payload = resp.json()
+            lots.update(parse_search_page(payload).get(name, {}))
+            cursor = next_cursor(payload)
+            if not cursor:
+                break
+        return lots
 
     async def fetch_names(self, names, game: str = "csgo") -> dict:
         """{назва: {id: ціна}} - окремий запит на кожну назву.
