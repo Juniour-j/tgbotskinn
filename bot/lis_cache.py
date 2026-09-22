@@ -54,6 +54,17 @@ class LisCache:
             return 0
         return sum(1 for price in m.values() if price <= max_price)
 
+    def fill_price(self, name: str, qty: int):
+        """Найдешевша ціна, за якою можна набрати `qty` лотів (сума знизу вгору).
+        None, якщо відомих лотів менше, ніж qty."""
+        m = self._lots.get(name)
+        if not m or qty < 1:
+            return None
+        prices = sorted(m.values())
+        if qty > len(prices):
+            return None
+        return prices[qty - 1]
+
     def ids_under(self, name: str, max_price: float, limit: int = 100) -> list:
         """ID лотів з ціною <= max_price, найдешевші перші, максимум `limit`.
 

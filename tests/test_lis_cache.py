@@ -106,6 +106,29 @@ def test_count_under_unknown_name_is_zero():
     assert c.count_under("Nope", 100) == 0
 
 
+def test_fill_price_returns_qty_th_cheapest_price():
+    c = LisCache()
+    for i, p in enumerate([0.19, 0.19, 0.20, 0.22, 0.30], start=1):
+        c.upsert("Item", i, p)
+    assert c.fill_price("Item", 1) == 0.19
+    assert c.fill_price("Item", 2) == 0.19
+    assert c.fill_price("Item", 3) == 0.20
+    assert c.fill_price("Item", 5) == 0.30
+
+
+def test_fill_price_none_when_not_enough_known_lots():
+    c = LisCache()
+    c.upsert("Item", 1, 0.19)
+    assert c.fill_price("Item", 2) is None
+
+
+def test_fill_price_unknown_name_and_bad_qty():
+    c = LisCache()
+    assert c.fill_price("Nope", 1) is None
+    c.upsert("Item", 1, 0.19)
+    assert c.fill_price("Item", 0) is None
+
+
 def test_names_lists_tracked_names():
     c = LisCache()
     c.upsert("A", 1, 0.1)

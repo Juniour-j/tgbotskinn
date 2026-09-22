@@ -41,11 +41,11 @@ def _price_alert(wid, name, target, direction, market):
     return "\n".join(lines), kb, one
 
 
-def _qty_alert(watch, name, qty, depth, market):
+def _qty_alert(watch, name, qty, market):
     t = watch["target_price"]
     inner = [f"можна купити <b>{_n(qty)} шт</b> по ≤ ${t:.2f}   ·   треба {watch['min_qty']}"]
     q_lis = next((q for k, _, q in market.quotes(name) if k == "lis"), None)
-    fp = depth.fill_price(name, watch["min_qty"])
+    fp = market.lis_fill_price(name, watch["min_qty"])
     parts = []
     if q_lis is not None:
         mark = "⚡" if market.lis_is_live(name) else ""
@@ -65,7 +65,7 @@ def _qty_alert(watch, name, qty, depth, market):
     return "\n".join(lines), kb, one
 
 
-async def _cycle(bot, client, depth, market):
+async def _cycle(bot, client, market):
     fired: dict[int, list] = {}  # chat_id -> [(text, kb, one_liner)]
     seen: dict[str, float] = {}  # name -> best price (для історії)
     for w in await db.all_watches():
@@ -85,7 +85,7 @@ async def _cycle(bot, client, depth, market):
             if met and not w["triggered"]:
                 if not muted:
                     fired.setdefault(w["chat_id"], []).append(
-                        _qty_alert(w, name, qty, depth, market))
+                        _qty_alert(w, name, qty, market))
                 await db.mark_triggered(w["id"], price, True)
             elif not met and w["triggered"]:
                 await db.mark_triggered(w["id"], price, False)
@@ -133,13 +133,13 @@ async def _cycle(bot, client, depth, market):
         await asyncio.sleep(0.05)
 
 
-async def run_poller(bot, client, depth, market, cfg):
+async def run_poller(bot, client, market, cfg):
     while True:
         try:
             await client.refresh()
             await market.refresh()
             if client.ready():
-                await _cycle(bot, client, depth, market)
+                await _cycle(bot, client, market)
         except asyncio.CancelledError:
             raise
         except Exception:

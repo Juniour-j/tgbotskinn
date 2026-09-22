@@ -68,6 +68,13 @@ class Market:
             return self._lis_cache.count_under(name, max_price)
         return self._depth.buyable_qty(name, max_price)
 
+    def lis_fill_price(self, name: str, qty: int):
+        """Найдешевша ціна, щоб набрати `qty` шт - з живого кешу, коли він щось
+        знає про назву, інакше з депсу (як depth.fill_price)."""
+        if self._lis_cache is not None and self._lis_cache.has(name):
+            return self._lis_cache.fill_price(name, qty)
+        return self._depth.fill_price(name, qty)
+
     def lis_status(self) -> dict:
         """Стан живого кешу для екрана /status."""
         if self._lis_cache is None:

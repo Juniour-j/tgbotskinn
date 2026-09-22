@@ -338,7 +338,7 @@ async def _list_view(user_id: int, market, page: int = 0):
         if r["min_qty"] > 1:
             have = market.lis_buyable_qty(r["skin_name"], t)
             met = have is not None and have >= r["min_qty"]
-            fp = depth.fill_price(r["skin_name"], r["min_qty"])
+            fp = market.lis_fill_price(r["skin_name"], r["min_qty"])
             now = f"{_n(have)} шт" if have is not None else "…"
             fill = f" · набрати {r['min_qty']} від <b>${fp:.2f}</b>" if fp else ""
             head = db.muted_label(r) or _icon(r, met)
@@ -585,7 +585,7 @@ async def _watch_card(user_id: int, wid: int, market):
         inner.append(f"<b>Стан</b>  {_state(w, met)}")
         if have is not None:
             inner.append(f"<b>Зараз</b>  {_n(have)} шт по ≤ ${t:.2f}")
-        fp = depth.fill_price(name, w["min_qty"])
+        fp = market.lis_fill_price(name, w["min_qty"])
         if fp is not None:
             inner.append(f"<b>Набір</b>  {w['min_qty']} шт від <b>${fp:.2f}</b>")
     else:
@@ -898,7 +898,7 @@ async def _add_watch(uid: int, chat_id: int, raw_name: str, price: float,
         elif have >= qty:
             lines.append(f"Зараз: <b>{_n(have)} шт</b> по ≤ ${price:.2f} — умова вже виконана ✅")
         else:
-            fp = depth.fill_price(canonical, qty)
+            fp = market.lis_fill_price(canonical, qty)
             lines.append(f"Зараз: лише {_n(have)} шт по ≤ ${price:.2f} (треба {qty}) — чекаю ⏳")
             if fp is not None:
                 lines.append(f"Набрати {qty} шт зараз: від <b>${fp:.2f}</b>")

@@ -95,7 +95,7 @@ async def main():
         return names
 
     tasks = [
-        asyncio.create_task(run_poller(bot, client, depth, market, cfg)),
+        asyncio.create_task(run_poller(bot, client, market, cfg)),
         asyncio.create_task(run_depth_refresher(depth, cfg)),
         asyncio.create_task(run_hist_pruner()),
     ]
