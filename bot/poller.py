@@ -168,8 +168,10 @@ async def run_lis_reconciler(cache, search, get_names, interval_s: int = 180):
             names = await get_names()
             if names:
                 fresh = await search.fetch_names(names)
-                for name in names:
-                    cache.replace_name(name, fresh.get(name, {}))
+                # лише ті назви, що дійсно прийшли у відповіді - fetch_names
+                # свідомо не кладе туди назву, чий запит впав мережево
+                for name, lots in fresh.items():
+                    cache.replace_name(name, lots)
         except asyncio.CancelledError:
             raise
         except Exception:
