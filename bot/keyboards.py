@@ -46,7 +46,8 @@ def menu_kb() -> InlineKeyboardMarkup:
          InlineKeyboardButton(text="💸 Топ кейсів", callback_data="top:cheap:0")],
         [InlineKeyboardButton(text="🔎 Знайти скін", callback_data="find"),
          InlineKeyboardButton(text="📈 Статус", callback_data="status")],
-        [InlineKeyboardButton(text="❓ Довідка", callback_data="help")],
+        [InlineKeyboardButton(text="🔑 Ключ купівлі", callback_data="key"),
+         InlineKeyboardButton(text="❓ Довідка", callback_data="help")],
     ])
 
 
@@ -197,6 +198,25 @@ def after_add_kb(wid: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="📊 Глибина", callback_data=f"dep:{wid}"),
          InlineKeyboardButton(text="⚙️ Керувати", callback_data=f"w:{wid}")],
         [InlineKeyboardButton(text="➕ Ще", callback_data="add"), _LIST, _HOME],
+    ])
+
+
+def key_kb(has_key: bool) -> InlineKeyboardMarkup:
+    if has_key:
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💰 Баланс", callback_data="keybal"),
+             InlineKeyboardButton(text="🔄 Оновити ключ", callback_data="keyset")],
+            [InlineKeyboardButton(text="🗑 Видалити", callback_data="keydel"), _HOME],
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Встановити ключ", callback_data="keyset")],
+        [_HOME],
+    ])
+
+
+def key_cancel_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Скасувати", callback_data="keycancel")],
     ])
 
 

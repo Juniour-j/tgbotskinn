@@ -1047,52 +1047,69 @@ async def cmd_sold(message: Message, command: CommandObject, market):
     await message.answer(text, reply_markup=kb)
 
 
+async def _key_view(uid: int, secrets_key):
+    blob = await db.get_user_key(uid)
+    has_key = blob is not None
+    body = ("Збережено ✅. Кнопкою «Баланс» перевіриш, чи ще живий."
+            if has_key else
+            "Ще не задано. Потрібен, щоб купувати через бота — окремо для кожного, "
+            "зі свого балансу lis-skins на свій Steam-акаунт.")
+    return f"<b>🔑 Ключ купівлі</b>\n\n{body}", keyboards.key_kb(has_key)
+
+
+async def _start_setkey(uid: int, secrets_key):
+    if not secrets_key:
+        return ("Купівля ще не налаштована на сервері (нема SECRETS_KEY). "
+                "Напиши адміну бота.", keyboards.back_kb())
+    _pending_setkey[uid] = "key"
+    _setkey_tmp.pop(uid, None)
+    return (
+        "<b>Ключ купівлі</b>\n\n"
+        "Встав свій API-ключ lis-skins (сайт → Профіль → API). "
+        "Повідомлення з ключем я одразу видалю.\n\n"
+        "<i>Це особистий ключ — купувати буде з твого балансу на твій Steam-акаунт.</i>",
+        keyboards.key_cancel_kb())
+
+
+async def _balance_text(uid: int, secrets_key, lis_buy):
+    blob = await db.get_user_key(uid)
+    if not blob or not secrets_key:
+        return "Ключ купівлі не задано. Напиши /setkey.", keyboards.back_kb()
+    try:
+        data = crypto_store.decrypt(secrets_key, blob)
+        bal = await lis_buy.get_balance(data["api_key"])
+    except Exception:
+        return ("Не вдалося отримати баланс — ключ міг стати недійсним. "
+                "Спробуй /setkey заново.", keyboards.back_kb())
+    return f"Баланс lis-skins: <b>${bal:.2f}</b>", keyboards.back_kb()
+
+
+async def _remove_key(uid: int) -> str:
+    _pending_setkey.pop(uid, None)
+    _setkey_tmp.pop(uid, None)
+    ok = await db.remove_user_key(uid)
+    return "Ключ купівлі видалено." if ok else "Ключа й не було збережено."
+
+
 @router.message(Command("setkey"))
 async def cmd_setkey(message: Message, secrets_key=None):
     if message.chat.type != "private":
         await message.answer("Напиши мені в особисті — там і встановиш ключ купівлі.")
         return
-    if not secrets_key:
-        await message.answer("Купівля ще не налаштована на сервері (нема SECRETS_KEY). "
-                             "Напиши адміну бота.", reply_markup=keyboards.back_kb())
-        return
-    uid = message.from_user.id
-    _pending_setkey[uid] = "key"
-    _setkey_tmp.pop(uid, None)
-    await message.answer(
-        "<b>Ключ купівлі</b>\n\n"
-        "Встав свій API-ключ lis-skins (сайт → Профіль → API). "
-        "Повідомлення з ключем я одразу видалю.\n\n"
-        "<i>Це особистий ключ — купувати буде з твого балансу на твій Steam-акаунт.</i>",
-        reply_markup=keyboards.back_kb())
+    text, kb = await _start_setkey(message.from_user.id, secrets_key)
+    await message.answer(text, reply_markup=kb)
 
 
 @router.message(Command("balance"))
 async def cmd_balance(message: Message, secrets_key=None, lis_buy=None):
-    uid = message.from_user.id
-    blob = await db.get_user_key(uid)
-    if not blob or not secrets_key:
-        await message.answer("Ключ купівлі не задано. Напиши /setkey.",
-                             reply_markup=keyboards.back_kb())
-        return
-    try:
-        data = crypto_store.decrypt(secrets_key, blob)
-        bal = await lis_buy.get_balance(data["api_key"])
-    except Exception:
-        await message.answer("Не вдалося отримати баланс — ключ міг стати недійсним. "
-                             "Спробуй /setkey заново.", reply_markup=keyboards.back_kb())
-        return
-    await message.answer(f"Баланс lis-skins: <b>${bal:.2f}</b>", reply_markup=keyboards.back_kb())
+    text, kb = await _balance_text(message.from_user.id, secrets_key, lis_buy)
+    await message.answer(text, reply_markup=kb)
 
 
 @router.message(Command("removekey"))
 async def cmd_removekey(message: Message):
-    uid = message.from_user.id
-    _pending_setkey.pop(uid, None)
-    _setkey_tmp.pop(uid, None)
-    ok = await db.remove_user_key(uid)
-    await message.answer("Ключ купівлі видалено." if ok else "Ключа й не було збережено.",
-                         reply_markup=keyboards.back_kb())
+    text = await _remove_key(message.from_user.id)
+    await message.answer(text, reply_markup=keyboards.back_kb())
 
 
 @router.message(Command("history"))
@@ -1402,7 +1419,7 @@ async def on_text(message: Message, client, depth, market, secrets_key=None, lis
 # ---------- інлайн-кнопки ----------
 
 @router.callback_query()
-async def on_callback(cb: CallbackQuery, client, depth, market):
+async def on_callback(cb: CallbackQuery, client, depth, market, secrets_key=None, lis_buy=None):
     if cb.message is None:
         await cb.answer()
         return
@@ -1432,6 +1449,29 @@ async def on_callback(cb: CallbackQuery, client, depth, market):
         return
     if action == "pf":
         await _show(cb, *await _portfolio_view(uid, market))
+        return
+    if action == "key":
+        await _show(cb, *await _key_view(uid, secrets_key))
+        return
+    if action == "keyset":
+        if cb.message.chat.type != "private":
+            await cb.answer("Напиши мені в особисті.")
+            return
+        text, kb = await _start_setkey(uid, secrets_key)
+        await cb.message.answer(text, reply_markup=kb)
+        await cb.answer()
+        return
+    if action == "keybal":
+        await _show(cb, *await _balance_text(uid, secrets_key, lis_buy))
+        return
+    if action == "keydel":
+        toast = await _remove_key(uid)
+        await _show(cb, *await _key_view(uid, secrets_key), toast=toast)
+        return
+    if action == "keycancel":
+        _pending_setkey.pop(uid, None)
+        _setkey_tmp.pop(uid, None)
+        await _show(cb, *await _key_view(uid, secrets_key), toast="скасовано")
         return
     if action == "srt":
         if sid in ("state", "price", "name"):
