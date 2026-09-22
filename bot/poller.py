@@ -160,6 +160,23 @@ async def run_depth_refresher(depth, cfg):
         await asyncio.sleep(max(60, cfg.depth_refresh_min * 60))
 
 
+async def run_lis_reconciler(cache, search, get_names, interval_s: int = 180):
+    """Періодично звіряє LisCache через search API — бекфіл при старті й лікування
+    після обриву WS-звʼязку. НЕ для миттєвих сповіщень (search відстає, як і сайт)."""
+    while True:
+        try:
+            names = await get_names()
+            if names:
+                fresh = await search.fetch_names(names)
+                for name in names:
+                    cache.replace_name(name, fresh.get(name, {}))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("lis reconcile cycle error")
+        await asyncio.sleep(interval_s)
+
+
 async def run_hist_pruner(keep_days: int = 70):
     """Раз на добу чистить старі погодинні знімки цін."""
     while True:

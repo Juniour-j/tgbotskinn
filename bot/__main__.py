@@ -26,8 +26,11 @@ from .config import Config
 from .depth import DepthIndex
 from .handlers import router
 from .lis import LisClient
+from .lis_cache import LisCache
+from .lis_search import LisSearchClient
+from .lis_ws import LisWsClient
 from .market import Market
-from .poller import run_depth_refresher, run_hist_pruner, run_poller
+from .poller import run_depth_refresher, run_hist_pruner, run_lis_reconciler, run_poller
 from .sources import build_sources
 from .steam import SteamPrices
 
@@ -53,12 +56,28 @@ async def main():
     if ext_sources:
         log.info("external markets: %s", ", ".join(s.key for s in ext_sources))
 
+    lis_cache = LisCache()
+    lis_search = None
+    lis_ws = None
+    if cfg.lis_api_key:
+        lis_search = LisSearchClient(cfg.lis_api_key)
+        lis_ws = LisWsClient(cfg.lis_api_key, lis_cache)
+        try:
+            await lis_ws.start()
+            log.info("lis-skins WS: connected, live price cache active")
+        except Exception:
+            log.warning("lis-skins WS: не вдалось підключитись, живий кеш поки порожній "
+                       "(звірка через search підхопить, коли зʼявиться звʼязок)", exc_info=True)
+    else:
+        log.info("LIS_API_KEY не задано — живий кеш вимкнено, бот працює як раніше")
+
     bot = Bot(cfg.telegram_token,
               default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
     dp["client"] = client
     dp["depth"] = depth
     dp["market"] = market
+    dp["lis_cache"] = lis_cache
     if cfg.allowed_user_ids:
         mw = AccessMiddleware(cfg.allowed_user_ids)
         dp.message.outer_middleware(mw)
@@ -70,11 +89,19 @@ async def main():
     except Exception:
         log.warning("set_my_commands failed", exc_info=True)
 
+    async def _lis_names():
+        names = set(await db.watched_names())
+        names.update(market.case_names(120))
+        return names
+
     tasks = [
         asyncio.create_task(run_poller(bot, client, depth, market, cfg)),
         asyncio.create_task(run_depth_refresher(depth, cfg)),
         asyncio.create_task(run_hist_pruner()),
     ]
+    if lis_search is not None:
+        tasks.append(asyncio.create_task(run_lis_reconciler(lis_cache, lis_search, _lis_names)))
+
     try:
         await dp.start_polling(bot)
     finally:
@@ -90,6 +117,10 @@ async def main():
         await steam.aclose()
         for s in ext_sources:
             await s.aclose()
+        if lis_ws is not None:
+            await lis_ws.aclose()
+        if lis_search is not None:
+            await lis_search.aclose()
         await db.close()
         await bot.session.close()
 

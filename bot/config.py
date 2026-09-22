@@ -43,6 +43,7 @@ class Config:
     mcsgo_url: str = DEFAULT_MCSGO_URL
     skinport_url: str = DEFAULT_SKINPORT_URL
     steam_enabled: bool = True
+    lis_api_key: str | None = None
 
     @classmethod
     def load(cls) -> "Config":
@@ -62,4 +63,5 @@ class Config:
             mcsgo_url=os.environ.get("MCSGO_URL", DEFAULT_MCSGO_URL),
             skinport_url=os.environ.get("SKINPORT_URL", DEFAULT_SKINPORT_URL),
             steam_enabled=os.environ.get("STEAM_ENABLED", "1") not in ("0", "false", ""),
+            lis_api_key=os.environ.get("LIS_API_KEY", "").strip() or None,
         )

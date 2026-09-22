@@ -4,3 +4,4 @@ aiosqlite>=0.20
 python-dotenv>=1.0
 ijson>=3.2
 brotli>=1.1          # Skinport API віддає лише brotli
+centrifuge-python>=0.3   # WS-клієнт lis-skins (жива ціна/наявність лотів), опційно — LIS_API_KEY
