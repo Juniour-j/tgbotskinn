@@ -252,11 +252,19 @@ def _money_signed(x) -> str:
     return ("−" if x < 0 else "+") + _money(abs(x))
 
 
+def _mkt_label(key: str, lbl: str, name: str, market, short: bool = False) -> str:
+    """Ярлик ринку; ⚡ на lis-skins, коли ціна жива (WS), а не з 10-хв депсу."""
+    out = _SHORT.get(lbl, lbl) if short else lbl
+    if key == "lis" and market.lis_is_live(name):
+        out += "⚡"
+    return out
+
+
 def _mkt_line(name: str, market, short: bool = False) -> str:
     qs = sorted(market.quotes(name), key=lambda t: t[2].price)
     return "  ·  ".join(
-        f"{(_SHORT.get(lbl, lbl) if short else lbl)} <b>${q.price:.2f}</b>"
-        for _, lbl, q in qs
+        f"{_mkt_label(key, lbl, name, market, short)} <b>${q.price:.2f}</b>"
+        for key, lbl, q in qs
     )
 
 
@@ -399,6 +407,8 @@ async def _status_view(market, client, depth):
         f"каталог lis: {len(client.names)} назв",
         f"глибина lis: {'—' if depth.age_min() < 0 else _ago(depth.age_min() * 60)}",
     ]
+    ls = market.lis_status()
+    lines.append(f"жива ціна lis ⚡: {'увімкнено, ' + str(ls['names']) + ' назв' if ls['active'] else 'вимкнено'}")
     for s in market.sources:
         st = s.status()
         age = _ago(st["age_s"])
@@ -602,7 +612,8 @@ async def _watch_card(user_id: int, wid: int, market):
              "<blockquote>" + "\n".join(inner) + "</blockquote>"]
     qs = sorted(market.quotes(name), key=lambda x: x[2].price)
     if qs:
-        rows = [_mkt_row(lbl, q, i == 0) for i, (_, lbl, q) in enumerate(qs)]
+        rows = [_mkt_row(_mkt_label(key, lbl, name, market), q, i == 0)
+                for i, (key, lbl, q) in enumerate(qs)]
         lines.append("<pre>" + _esc("\n".join(rows)) + "</pre>")
         sn = _steam_note(name, qs[0][2].price, market)
         if sn:
@@ -831,9 +842,9 @@ async def _compare_view(uid: int, name: str, market):
     if not qs:
         return f"<b>{_esc(name)}</b>\n\nЦіни ніде не знайшов.", keyboards.compare_kb()
     rows = []
-    for i, (_, lbl, q) in enumerate(qs):
+    for i, (key, lbl, q) in enumerate(qs):
         mark = "▸ " if i == 0 else "  "
-        line = f"{mark}{lbl:<12}{_money(q.price):>10}"
+        line = f"{mark}{_mkt_label(key, lbl, name, market):<12}{_money(q.price):>10}"
         if q.buy_order:
             line += f"   скуп {_money(q.buy_order)}"
         if q.qty:

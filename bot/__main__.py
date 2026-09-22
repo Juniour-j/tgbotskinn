@@ -52,11 +52,11 @@ async def main():
     depth = DepthIndex(cfg)
     ext_sources = build_sources(cfg)
     steam = SteamPrices(cfg.steam_enabled)
-    market = Market(client, depth, ext_sources, steam)
+    lis_cache = LisCache()
+    market = Market(client, depth, ext_sources, steam, lis_cache=lis_cache)
     if ext_sources:
         log.info("external markets: %s", ", ".join(s.key for s in ext_sources))
 
-    lis_cache = LisCache()
     lis_search = None
     lis_ws = None
     if cfg.lis_api_key:

@@ -1,5 +1,6 @@
 import types
 
+from bot.lis_cache import LisCache
 from bot.market import Market
 from bot.sources import McsgoSource, SkinportSource, Quote
 
@@ -81,3 +82,48 @@ def test_market_summary():
     m = _market()
     assert m.summary("Kilowatt Case") == "lis-skins $0.14 · market.csgo $0.13 · skinport $0.15"
     assert m.summary("Unknown") == ""
+
+
+# ---------- живий кеш lis-skins (WS) ----------
+
+def _market_with_cache(cache):
+    depth = _Depth({"Kilowatt Case": 0.14})
+    mc = _Src("mcsgo", "market.csgo", {"Kilowatt Case": Quote(0.128, 340, "u")})
+    return Market(_Client(), depth, [mc], lis_cache=cache)
+
+
+def test_lis_quote_prefers_live_cache_over_depth():
+    cache = LisCache()
+    cache.upsert("Kilowatt Case", 1, 0.09)
+    cache.upsert("Kilowatt Case", 2, 0.10)
+    m = _market_with_cache(cache)
+    qs = dict((k, q) for k, _, q in m.quotes("Kilowatt Case"))
+    assert abs(qs["lis"].price - 0.09) < 1e-9   # не 0.14 з депсу
+    assert qs["lis"].qty == 2                   # скільки лотів у кеші зараз
+    assert m.lis_is_live("Kilowatt Case") is True
+
+
+def test_lis_quote_falls_back_to_depth_when_cache_has_no_data():
+    cache = LisCache()  # порожній для цієї назви
+    m = _market_with_cache(cache)
+    qs = dict((k, q) for k, _, q in m.quotes("Kilowatt Case"))
+    assert abs(qs["lis"].price - 0.14) < 1e-9
+    assert m.lis_is_live("Kilowatt Case") is False
+
+
+def test_market_without_lis_cache_arg_behaves_as_before():
+    m = _market()  # без lis_cache взагалі
+    assert m.lis_is_live("Kilowatt Case") is False
+    qs = dict((k, q) for k, _, q in m.quotes("Kilowatt Case"))
+    assert abs(qs["lis"].price - 0.14) < 1e-9
+
+
+def test_lis_status_reports_active_state_and_name_count():
+    m_off = _market()
+    assert m_off.lis_status() == {"active": False, "names": 0}
+
+    cache = LisCache()
+    cache.upsert("Kilowatt Case", 1, 0.09)
+    cache.upsert("Fever Case", 2, 0.30)
+    m_on = _market_with_cache(cache)
+    assert m_on.lis_status() == {"active": True, "names": 2}

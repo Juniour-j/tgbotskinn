@@ -14,11 +14,12 @@ _CASE_SUFFIX = (" Case",)
 
 
 class Market:
-    def __init__(self, client, depth, ext_sources, steam=None):
+    def __init__(self, client, depth, ext_sources, steam=None, lis_cache=None):
         self._client = client
         self._depth = depth
         self._ext = list(ext_sources)
         self.steam = steam
+        self._lis_cache = lis_cache
 
     @property
     def depth(self):
@@ -42,14 +43,29 @@ class Market:
                 log.exception("%s refresh failed", s.key)
 
     def _lis_quote(self, name: str):
-        sp = self._depth.site_price(name)
         item = self._client.lookup(name)
         url = item.url if item is not None else ""
+        if self._lis_cache is not None:
+            best = self._lis_cache.best(name)
+            if best is not None:
+                _, price = best
+                return Quote(price, self._lis_cache.count(name), url)
+        sp = self._depth.site_price(name)
         if sp is not None:
             return Quote(sp, self._depth.count(name) or 0, url)
         if item is not None:
             return Quote(item.price, item.count, url)
         return None
+
+    def lis_is_live(self, name: str) -> bool:
+        """Чи ціна lis-skins для назви зараз береться з живого WS-кешу (не з 10-хв депсу)."""
+        return self._lis_cache is not None and self._lis_cache.has(name)
+
+    def lis_status(self) -> dict:
+        """Стан живого кешу для екрана /status."""
+        if self._lis_cache is None:
+            return {"active": False, "names": 0}
+        return {"active": True, "names": len(self._lis_cache.names())}
 
     def quotes(self, name: str):
         """[(key, label, Quote)] по всіх ринках, де є ціна; lis-skins перший."""
