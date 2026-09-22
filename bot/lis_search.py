@@ -14,7 +14,9 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 
 import httpx
 
@@ -50,10 +52,24 @@ class LisSearchClient:
     Виняток: fetch_names її ізоляція по назвах — це і є фікс реального бага,
     покритий тестами через httpx.MockTransport (без справжньої мережі)."""
 
+    _MIN_GAP = 0.4  # пауза між запитами - тримає нас під лімітом 200/хв search API
+    # (~120 назв x до 3 сторінок без паузи легко пробʼє ліміт; з паузою - максимум
+    # ~150/хв, з запасом)
+
     def __init__(self, api_key: str, timeout: float = 15.0, base_url: str = SEARCH_URL):
         self._key = api_key
         self._url = base_url
         self._http = httpx.AsyncClient(timeout=timeout)
+        self._lock = asyncio.Lock()
+        self._last_req = 0.0
+
+    async def _throttled_get(self, params, headers):
+        async with self._lock:
+            gap = time.monotonic() - self._last_req
+            if gap < self._MIN_GAP:
+                await asyncio.sleep(self._MIN_GAP - gap)
+            self._last_req = time.monotonic()
+            return await self._http.get(self._url, params=params, headers=headers)
 
     async def fetch_name(self, name: str, game: str = "csgo", max_pages: int = 3) -> dict:
         """{id лота: ціна} для ОДНІЄЇ назви, найдешевші перші.
@@ -71,7 +87,7 @@ class LisSearchClient:
                       ("only_unlocked", "1"), ("names[]", name)]
             if cursor:
                 params.append(("cursor", cursor))
-            resp = await self._http.get(self._url, params=params, headers=headers)
+            resp = await self._throttled_get(params, headers)
             resp.raise_for_status()
             payload = resp.json()
             lots.update(parse_search_page(payload).get(name, {}))

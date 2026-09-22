@@ -2,6 +2,7 @@
 лоти однієї з назв. Фікс - окремий запит на кожну назву; перевіряємо саме це,
 через httpx.MockTransport (без справжньої мережі)."""
 import asyncio
+import time
 
 import httpx
 
@@ -106,6 +107,36 @@ def test_fetch_name_paginates_within_single_name_until_no_cursor():
         assert calls == [None, "p2"]
 
     asyncio.run(go())
+
+
+def test_fetch_name_paces_requests_under_rate_limit():
+    # регресія на реальний ризик: ~120 назв x до 3 сторінок без паузи легко
+    # перевищить 200 запитів/хв search API
+    times = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        times.append(time.monotonic())
+        cursor = request.url.params.get("cursor")
+        if cursor is None:
+            return httpx.Response(200, json={
+                "data": [{"id": 1, "name": "X", "price": 0.1}],
+                "meta": {"per_page": 200, "next_cursor": "p2"}})
+        return httpx.Response(200, json={
+            "data": [{"id": 2, "name": "X", "price": 0.2}],
+            "meta": {"per_page": 200, "next_cursor": None}})
+
+    async def go():
+        client = LisSearchClient("key")
+        client._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        client._MIN_GAP = 0.05  # менша пауза - той самий механізм, швидший тест
+        try:
+            await client.fetch_name("X", max_pages=3)
+        finally:
+            await client.aclose()
+
+    asyncio.run(go())
+    assert len(times) == 2
+    assert times[1] - times[0] >= 0.05 - 0.01
 
 
 def test_fetch_name_stops_at_max_pages_safety_cap():
