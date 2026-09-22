@@ -44,11 +44,12 @@ def _price_alert(wid, name, target, direction, market):
 def _qty_alert(watch, name, qty, depth, market):
     t = watch["target_price"]
     inner = [f"можна купити <b>{_n(qty)} шт</b> по ≤ ${t:.2f}   ·   треба {watch['min_qty']}"]
-    sp = depth.site_price(name)
+    q_lis = next((q for k, _, q in market.quotes(name) if k == "lis"), None)
     fp = depth.fill_price(name, watch["min_qty"])
     parts = []
-    if sp is not None:
-        parts.append(f"lis-skins ${sp:.2f}")
+    if q_lis is not None:
+        mark = "⚡" if market.lis_is_live(name) else ""
+        parts.append(f"lis-skins ${q_lis.price:.2f}{mark}")
     if fp is not None:
         parts.append(f"набрати {watch['min_qty']} від ${fp:.2f}")
     if parts:
@@ -58,7 +59,6 @@ def _qty_alert(watch, name, qty, depth, market):
         inner.append("інші ринки: " + " · ".join(other))
     lines = [f"🔔 <b>Обсяг зібрався</b>  ·  <b>{_esc(name)}</b>",
              "<blockquote>" + "\n".join(inner) + "</blockquote>"]
-    q_lis = next((q for k, _, q in market.quotes(name) if k == "lis"), None)
     url = q_lis.url if q_lis else ""
     kb = keyboards.alert_kb("lis-skins", url, watch["id"])
     one = f"<b>#{watch['id']} {_esc(name)}</b> — {_n(qty)} шт по ≤ ${t:.2f} (треба {watch['min_qty']})"
@@ -78,7 +78,7 @@ async def _cycle(bot, client, depth, market):
             seen[name] = price
 
         if min_qty > 1:
-            qty = depth.buyable_qty(name, w["target_price"])
+            qty = market.lis_buyable_qty(name, w["target_price"])
             if qty is None:
                 continue
             met = qty >= min_qty

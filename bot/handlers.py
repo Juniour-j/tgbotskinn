@@ -336,7 +336,7 @@ async def _list_view(user_id: int, market, page: int = 0):
         tag = _trend_tag(hist_map.get(r["skin_name"], []))
         trend = f"  ·  {tag}" if tag else ""
         if r["min_qty"] > 1:
-            have = depth.buyable_qty(r["skin_name"], t)
+            have = market.lis_buyable_qty(r["skin_name"], t)
             met = have is not None and have >= r["min_qty"]
             fp = depth.fill_price(r["skin_name"], r["min_qty"])
             now = f"{_n(have)} шт" if have is not None else "…"
@@ -579,7 +579,7 @@ async def _watch_card(user_id: int, wid: int, market):
     best = market.best(name)
     inner = []
     if w["min_qty"] > 1:
-        have = depth.buyable_qty(name, t)
+        have = market.lis_buyable_qty(name, t)
         met = have is not None and have >= w["min_qty"]
         inner.append(f"<b>Ціль</b>  ≥ {w['min_qty']} шт по ≤ <b>${t:.2f}</b>  (lis-skins)")
         inner.append(f"<b>Стан</b>  {_state(w, met)}")
@@ -891,7 +891,7 @@ async def _add_watch(uid: int, chat_id: int, raw_name: str, price: float,
     best = market.best(canonical)
     if qty > 1:
         lines.append(f"Ціль: ≥ {qty} шт по ≤ <b>${price:.2f}</b>  (lis-skins)")
-        have = depth.buyable_qty(canonical, price)
+        have = market.lis_buyable_qty(canonical, price)
         if have is None:
             lines.append("Зараз: глибина ще вантажиться (~хвилина).")
             asyncio.create_task(_kick_depth(depth))

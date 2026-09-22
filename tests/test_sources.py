@@ -118,6 +118,22 @@ def test_market_without_lis_cache_arg_behaves_as_before():
     assert abs(qs["lis"].price - 0.14) < 1e-9
 
 
+def test_lis_buyable_qty_prefers_live_cache():
+    cache = LisCache()
+    cache.upsert("Kilowatt Case", 1, 0.19)
+    cache.upsert("Kilowatt Case", 2, 0.19)
+    cache.upsert("Kilowatt Case", 3, 0.30)
+    m = _market_with_cache(cache)
+    assert m.lis_buyable_qty("Kilowatt Case", 0.19) == 2
+
+
+def test_lis_buyable_qty_falls_back_to_depth_when_not_live():
+    depth = _Depth({"Kilowatt Case": 0.14})
+    depth.buyable_qty = lambda name, price: 77  # фейкова депс-відповідь
+    m = Market(_Client(), depth, [], lis_cache=LisCache())  # порожній кеш для назви
+    assert m.lis_buyable_qty("Kilowatt Case", 0.14) == 77
+
+
 def test_lis_status_reports_active_state_and_name_count():
     m_off = _market()
     assert m_off.lis_status() == {"active": False, "names": 0}

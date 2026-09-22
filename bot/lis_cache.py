@@ -47,6 +47,13 @@ class LisCache:
         lot_id = min(m, key=m.get)
         return lot_id, m[lot_id]
 
+    def count_under(self, name: str, max_price: float) -> int:
+        """Скільки лотів з ціною <= max_price (як «Фільтри відповідають N» на сайті)."""
+        m = self._lots.get(name)
+        if not m:
+            return 0
+        return sum(1 for price in m.values() if price <= max_price)
+
     def ids_under(self, name: str, max_price: float, limit: int = 100) -> list:
         """ID лотів з ціною <= max_price, найдешевші перші, максимум `limit`.
 

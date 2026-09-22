@@ -90,6 +90,22 @@ def test_ids_under_unknown_name_returns_empty():
     assert c.ids_under("Nope", max_price=100) == []
 
 
+def test_count_under_counts_all_at_or_below_price():
+    c = LisCache()
+    c.upsert("Item", 1, 0.19)
+    c.upsert("Item", 2, 0.19)
+    c.upsert("Item", 3, 0.20)
+    c.upsert("Item", 4, 200.0)
+    assert c.count_under("Item", 0.19) == 2
+    assert c.count_under("Item", 0.20) == 3
+    assert c.count_under("Item", 1000.0) == 4
+
+
+def test_count_under_unknown_name_is_zero():
+    c = LisCache()
+    assert c.count_under("Nope", 100) == 0
+
+
 def test_names_lists_tracked_names():
     c = LisCache()
     c.upsert("A", 1, 0.1)

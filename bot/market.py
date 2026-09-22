@@ -61,6 +61,13 @@ class Market:
         """Чи ціна lis-skins для назви зараз береться з живого WS-кешу (не з 10-хв депсу)."""
         return self._lis_cache is not None and self._lis_cache.has(name)
 
+    def lis_buyable_qty(self, name: str, max_price: float):
+        """Скільки лотів lis-skins можна купити по <= max_price - з живого кешу,
+        коли він щось знає про назву, інакше з депсу (як depth.buyable_qty)."""
+        if self._lis_cache is not None and self._lis_cache.has(name):
+            return self._lis_cache.count_under(name, max_price)
+        return self._depth.buyable_qty(name, max_price)
+
     def lis_status(self) -> dict:
         """Стан живого кешу для екрана /status."""
         if self._lis_cache is None:
