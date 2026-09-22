@@ -13,7 +13,8 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, Message
 
-from . import alerts, db, history, keyboards, matcher
+from . import alerts, crypto_store, db, history, keyboards, matcher
+from .lis_buy import parse_trade_url
 
 log = logging.getLogger("handlers")
 router = Router()
@@ -66,6 +67,8 @@ _pending_edit: dict[int, int] = {}      # user_id -> watch_id, чекаємо н
 _pending_compare: set[int] = set()      # user_id -> чекаємо назву для /compare
 _pending_buy: set[int] = set()          # user_id -> чекаємо "назва qty ціна" для купівлі
 _pending_sell: dict[int, int] = {}      # user_id -> holding_id, чекаємо "qty ціна" продажу
+_pending_setkey: dict[int, str] = {}    # user_id -> "key"|"trade", крок збереження ключа купівлі
+_setkey_tmp: dict[int, str] = {}        # user_id -> перевірений API-ключ, чекаємо Trade URL
 _last_search: dict[int, list] = {}      # user_id -> список знайдених назв
 _sort_mode: dict[int, str] = {}         # user_id -> "state"|"price"|"name"
 _last_deleted: dict[int, list] = {}     # user_id -> [{skin_name,target_price,min_qty,direction}, ...]
@@ -1044,6 +1047,54 @@ async def cmd_sold(message: Message, command: CommandObject, market):
     await message.answer(text, reply_markup=kb)
 
 
+@router.message(Command("setkey"))
+async def cmd_setkey(message: Message, secrets_key=None):
+    if message.chat.type != "private":
+        await message.answer("Напиши мені в особисті — там і встановиш ключ купівлі.")
+        return
+    if not secrets_key:
+        await message.answer("Купівля ще не налаштована на сервері (нема SECRETS_KEY). "
+                             "Напиши адміну бота.", reply_markup=keyboards.back_kb())
+        return
+    uid = message.from_user.id
+    _pending_setkey[uid] = "key"
+    _setkey_tmp.pop(uid, None)
+    await message.answer(
+        "<b>Ключ купівлі</b>\n\n"
+        "Встав свій API-ключ lis-skins (сайт → Профіль → API). "
+        "Повідомлення з ключем я одразу видалю.\n\n"
+        "<i>Це особистий ключ — купувати буде з твого балансу на твій Steam-акаунт.</i>",
+        reply_markup=keyboards.back_kb())
+
+
+@router.message(Command("balance"))
+async def cmd_balance(message: Message, secrets_key=None, lis_buy=None):
+    uid = message.from_user.id
+    blob = await db.get_user_key(uid)
+    if not blob or not secrets_key:
+        await message.answer("Ключ купівлі не задано. Напиши /setkey.",
+                             reply_markup=keyboards.back_kb())
+        return
+    try:
+        data = crypto_store.decrypt(secrets_key, blob)
+        bal = await lis_buy.get_balance(data["api_key"])
+    except Exception:
+        await message.answer("Не вдалося отримати баланс — ключ міг стати недійсним. "
+                             "Спробуй /setkey заново.", reply_markup=keyboards.back_kb())
+        return
+    await message.answer(f"Баланс lis-skins: <b>${bal:.2f}</b>", reply_markup=keyboards.back_kb())
+
+
+@router.message(Command("removekey"))
+async def cmd_removekey(message: Message):
+    uid = message.from_user.id
+    _pending_setkey.pop(uid, None)
+    _setkey_tmp.pop(uid, None)
+    ok = await db.remove_user_key(uid)
+    await message.answer("Ключ купівлі видалено." if ok else "Ключа й не було збережено.",
+                         reply_markup=keyboards.back_kb())
+
+
 @router.message(Command("history"))
 async def cmd_history(message: Message, command: CommandObject, market):
     arg = (command.args or "").strip().lstrip("#")
@@ -1213,10 +1264,57 @@ async def _do_search(message: Message, q: str, client, market):
 
 
 @router.message(F.text & ~F.text.startswith("/"))
-async def on_text(message: Message, client, depth, market):
+async def on_text(message: Message, client, depth, market, secrets_key=None, lis_buy=None):
     txt = (message.text or "").strip()
     uid = message.from_user.id
-    if not txt or len(txt) > 120:
+    if not txt:
+        return
+
+    # особистий ключ купівлі: крок 1 - API-ключ, крок 2 - Trade URL.
+    # Перевіряємо ДО загального ліміту довжини (ключі можуть бути довшими за 120 символів)
+    # і одразу видаляємо повідомлення - воно містить секрет.
+    if uid in _pending_setkey:
+        stage = _pending_setkey[uid]
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        if stage == "key":
+            if not secrets_key:
+                _pending_setkey.pop(uid, None)
+                await message.answer("Купівля не налаштована на сервері (нема SECRETS_KEY).")
+                return
+            candidate = txt
+            try:
+                await lis_buy.get_balance(candidate)
+            except Exception:
+                await message.answer("Ключ не спрацював — перевір, що скопіював правильно, "
+                                     "і встав ще раз (або /menu, щоб скасувати).")
+                return
+            _setkey_tmp[uid] = candidate
+            _pending_setkey[uid] = "trade"
+            await message.answer(
+                "Ключ робочий ✅\n\nТепер встав свій Trade URL "
+                "(Steam → Інвентар → Обмін предметами → посилання для обміну).")
+            return
+        parsed = parse_trade_url(txt)
+        if parsed is None:
+            await message.answer("Не розпізнав Trade URL — встав повне посилання ще раз.")
+            return
+        partner, token = parsed
+        api_key = _setkey_tmp.pop(uid, None)
+        _pending_setkey.pop(uid, None)
+        if not api_key:
+            await message.answer("Сесія збереження ключа застаріла — почни з /setkey.")
+            return
+        blob = crypto_store.encrypt(secrets_key, {
+            "api_key": api_key, "partner": partner, "token": token})
+        await db.set_user_key(uid, blob)
+        await message.answer("✅ Ключ купівлі збережено. Перевір командою /balance.",
+                             reply_markup=keyboards.back_kb())
+        return
+
+    if len(txt) > 120:
         return
 
     # порівняти ціни на введеній назві

@@ -45,6 +45,12 @@ CREATE TABLE IF NOT EXISTS holdings (
     bought_at TEXT    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_holdings_user ON holdings(user_id);
+
+CREATE TABLE IF NOT EXISTS user_keys (
+    user_id    INTEGER PRIMARY KEY,
+    enc_blob   BLOB    NOT NULL,
+    updated_at TEXT    NOT NULL
+) WITHOUT ROWID;
 """
 
 # прості міграції для БД, створених ранішими версіями
@@ -329,5 +335,29 @@ async def remove_holding(user_id: int, hid: int) -> bool:
     cur = await _db.execute(
         "DELETE FROM holdings WHERE user_id=? AND id=?", (user_id, hid)
     )
+    await _db.commit()
+    return cur.rowcount > 0
+
+
+# ---------- особисті ключі купівлі (зашифровані, bot/crypto_store.py) ----------
+
+async def set_user_key(user_id: int, enc_blob: bytes) -> None:
+    await _db.execute(
+        "INSERT INTO user_keys(user_id, enc_blob, updated_at) VALUES (?, ?, ?) "
+        "ON CONFLICT(user_id) DO UPDATE SET enc_blob=excluded.enc_blob, "
+        "updated_at=excluded.updated_at",
+        (user_id, enc_blob, _now()),
+    )
+    await _db.commit()
+
+
+async def get_user_key(user_id: int):
+    cur = await _db.execute("SELECT enc_blob FROM user_keys WHERE user_id=?", (user_id,))
+    row = await cur.fetchone()
+    return row["enc_blob"] if row else None
+
+
+async def remove_user_key(user_id: int) -> bool:
+    cur = await _db.execute("DELETE FROM user_keys WHERE user_id=?", (user_id,))
     await _db.commit()
     return cur.rowcount > 0

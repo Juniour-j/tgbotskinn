@@ -13,6 +13,9 @@ _COMMANDS = [
     BotCommand(command="portfolio", description="Портфель і P&L"),
     BotCommand(command="buy", description="Записати купівлю: /buy назва qty ціна"),
     BotCommand(command="sold", description="Продаж: /sold <id> [qty] [ціна]"),
+    BotCommand(command="setkey", description="Ключ купівлі + Trade URL"),
+    BotCommand(command="balance", description="Баланс lis-skins"),
+    BotCommand(command="removekey", description="Видалити ключ купівлі"),
     BotCommand(command="top", description="Топ кейсів: дешеві / розкид / рух 7д"),
     BotCommand(command="compare", description="Порівняти ціни по ринках"),
     BotCommand(command="status", description="Стан бота і джерел"),
@@ -26,6 +29,7 @@ from .config import Config
 from .depth import DepthIndex
 from .handlers import router
 from .lis import LisClient
+from .lis_buy import LisBuyClient
 from .lis_cache import LisCache
 from .lis_search import LisSearchClient
 from .lis_ws import LisWsClient
@@ -71,6 +75,10 @@ async def main():
     else:
         log.info("LIS_API_KEY не задано — живий кеш вимкнено, бот працює як раніше")
 
+    lis_buy = LisBuyClient()
+    if not cfg.secrets_key:
+        log.info("SECRETS_KEY не задано — /setkey і купівля вимкнені, решта бота як раніше")
+
     bot = Bot(cfg.telegram_token,
               default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
@@ -78,6 +86,8 @@ async def main():
     dp["depth"] = depth
     dp["market"] = market
     dp["lis_cache"] = lis_cache
+    dp["lis_buy"] = lis_buy
+    dp["secrets_key"] = cfg.secrets_key
     if cfg.allowed_user_ids:
         mw = AccessMiddleware(cfg.allowed_user_ids)
         dp.message.outer_middleware(mw)
@@ -121,6 +131,7 @@ async def main():
             await lis_ws.aclose()
         if lis_search is not None:
             await lis_search.aclose()
+        await lis_buy.aclose()
         await db.close()
         await bot.session.close()
 
